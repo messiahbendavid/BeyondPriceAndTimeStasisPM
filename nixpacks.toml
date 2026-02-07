@@ -1,0 +1,18 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = [
+    "python -m venv /opt/venv",
+    ". /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+]
+
+[phases.build]
+cmds = ["echo 'Build complete'"]
+
+[variables]
+VIRTUAL_ENV = "/opt/venv"
+PATH = "/opt/venv/bin:/usr/bin:/bin"
+
+[start]
+cmd = "/opt/venv/bin/gunicorn stasis_pm_server:server --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300 --preload"
