@@ -834,12 +834,12 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG],
 app.title = "🎰 STASIS PM"
 server = app.server
 
-app.index_string = f'''<!DOCTYPE html>
+app.index_string = '''<!DOCTYPE html>
 <html><head>
-0<title>0</title>00
-<style>{PM_CSS}</style>
+{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<style>''' + PM_CSS + '''</style>
 </head><body>
-0<footer>000</footer>
+{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
 </body></html>'''
 
 app.layout = html.Div([
