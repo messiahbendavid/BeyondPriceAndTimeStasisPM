@@ -1,9 +1,0 @@
-[build]
-builder = "nixpacks"
-
-[deploy]
-startCommand = "/opt/venv/bin/gunicorn stasis_pm_server:server --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300 --preload"
-healthcheckPath = "/api/health"
-healthcheckTimeout = 300
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 5
