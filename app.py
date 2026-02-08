@@ -818,6 +818,15 @@ body { background: linear-gradient(180deg, #0a0a12 0%, #10101e 50%, #0a0a12 100%
                border-radius: 4px; padding: 6px; margin: 3px 0; }
 .pm-position-long { border-left: 3px solid #00ff88; }
 .pm-position-short { border-left: 3px solid #ff4444; }
+.sym-clickable {
+    cursor: pointer; color: #00ff88; font-weight: bold; font-size: 11px;
+    text-decoration: none; border-bottom: 1px dotted rgba(0,255,136,0.3);
+    transition: all 0.15s;
+}
+.sym-clickable:hover {
+    color: #00ffff; text-shadow: 0 0 8px #00ffff;
+    border-bottom-color: #00ffff;
+}
 """
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG],
@@ -827,17 +836,21 @@ server = app.server
 
 app.index_string = f'''<!DOCTYPE html>
 <html><head>
-{{%metas%}}<title>{{%title%}}</title>{{%favicon%}}{{%css%}}
+0<title>0</title>00
 <style>{PM_CSS}</style>
 </head><body>
-{{%app_entry%}}<footer>{{%config%}}{{%scripts%}}{{%renderer%}}</footer>
+0<footer>000</footer>
 </body></html>'''
 
 app.layout = html.Div([
     dcc.Store(id='pm-bet-amount', data=100),
     dcc.Store(id='pm-trigger', data=0),
     dcc.Store(id='pm-filter-mode', data='signals'),
+    dcc.Store(id='pm-selected-symbol', data=''),       # NEW: store for selected symbol
     dcc.Interval(id='tick', interval=1000, n_intervals=0),
+
+    # NEW: hidden div for symbol bridge (like AM)
+    html.Div(id='_pm_sym_bridge', style={'display': 'none'}),
 
     dbc.Toast(id="pm-toast", header="", is_open=False, duration=3500, dismissable=True,
               style={"position": "fixed", "top": 10, "left": "50%",
@@ -882,6 +895,10 @@ app.layout = html.Div([
                          size="sm") for a in BET_SIZES],
         ], className="d-flex align-items-center flex-wrap mb-1"),
 
+        # NEW: Click hint
+        html.Div("💡 Click any symbol name to look up on SA/RH/TT",
+                 style={'fontSize': '9px', 'color': '#aa8800', 'padding': '2px 0 4px 0'}),
+
         # Markets
         html.Div(id='pm-market-list', style={'height': '50vh', 'overflowY': 'auto'}),
 
@@ -915,6 +932,44 @@ app.layout = html.Div([
                  style={'fontSize': '8px', 'color': '#444', 'padding': '8px'}),
     ], style={'padding': '8px', 'minHeight': '100vh'}),
 ])
+
+
+# ============================================================================
+# NEW: Symbol bridge callback — writes selected symbol to window.name
+# so the desktop app can read it via polling
+# ============================================================================
+
+app.clientside_callback(
+    """function(sym) {
+        if (sym && sym.length > 0) {
+            window.name = 'STASIS_SYM:' + sym;
+        }
+        return '';
+    }""",
+    Output('_pm_sym_bridge', 'children'),
+    Input('pm-selected-symbol', 'data'),
+    prevent_initial_call=True
+)
+
+
+# NEW: Callback to handle symbol clicks from the market list
+@app.callback(
+    Output('pm-selected-symbol', 'data'),
+    Input({'type': 'pm-sym-click', 'symbol': ALL}, 'n_clicks'),
+    prevent_initial_call=True)
+def pm_symbol_clicked(clicks):
+    ctx = callback_context
+    if not ctx.triggered or not any(clicks):
+        return no_update
+    try:
+        prop = ctx.triggered[0]['prop_id']
+        d = json.loads(prop.rsplit('.', 1)[0])
+        sym = d.get('symbol', '')
+        if sym:
+            return sym
+    except:
+        pass
+    return no_update
 
 
 # ============================================================================
@@ -1041,8 +1096,15 @@ def pm_market_list(n, fmode, fdir, bet, trigger):
                     html.Span(f"#{i + 1}",
                               style={'color': '#ffd700' if i < 3 else '#555', 'fontSize': '9px'}),
                     html.Span(f" {emoji} ", style={'fontSize': '12px'}),
-                    html.Span(sym, style={'color': '#00ff88', 'fontWeight': 'bold',
-                                          'fontSize': '11px'}),
+                    # CHANGED: symbol is now a clickable button with pattern-matching ID
+                    html.Button(
+                        sym,
+                        id={'type': 'pm-sym-click', 'symbol': sym},
+                        className="sym-clickable",
+                        style={'background': 'none', 'border': 'none', 'padding': '0',
+                               'cursor': 'pointer', 'color': '#00ff88', 'fontWeight': 'bold',
+                               'fontSize': '11px', 'borderBottom': '1px dotted rgba(0,255,136,0.3)'},
+                    ),
                 ], width=3),
                 dbc.Col([
                     html.Span(d, style={'color': dc, 'fontWeight': 'bold', 'fontSize': '9px'}),
