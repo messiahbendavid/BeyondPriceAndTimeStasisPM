@@ -513,7 +513,7 @@ class Bitstream:
         elif prev >= 2 and sc < 2:
             self.stasis_info = None
         if sc >= 2:
-            self.direction = Direction.LONG if self.last_bit == 0 else Direction.SHORT
+            self.direction = Direction.LONG if self.last_bit == 1 else Direction.SHORT
             if sc >= 10:
                 self.signal_strength = SignalStrength.VERY_STRONG
             elif sc >= 7:
