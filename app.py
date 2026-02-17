@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-STASIS PM — Prediction Markets Server (Jackpot Edition)
-Deploy to: stasisPM.beyondpriceandtime.com
+STASIS AM — Alpha Markets Server
+Deploy to: stasisAM.beyondpriceandtime.com
 Copyright © 2026 Truth Communications LLC. All Rights Reserved.
 
 Requirements:
@@ -19,10 +19,9 @@ from enum import Enum
 import copy
 import json
 import os
-import uuid
 
 import dash
-from dash import dcc, html, Input, Output, State, callback_context, ALL, no_update, dash_table
+from dash import dcc, html, Input, Output, State, callback_context, dash_table
 import dash_bootstrap_components as dbc
 import pandas as pd
 import websocket
@@ -34,113 +33,16 @@ import requests
 # ============================================================================
 
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "PnzhJOXEJO7tSpHr0ct2zjFKi6XO0yGi")
-BET_SIZES = [25, 50, 100, 250, 500, 1000]
-STARTING_BALANCE = 10000.00
-
-JACKPOT_TIERS = {
-    'GRAND_JACKPOT': {'min_levels': 8, 'min_alignment': 100, 'emoji': '💎', 'color': '#ff00ff'},
-    'MEGA_JACKPOT': {'min_levels': 6, 'min_alignment': 100, 'emoji': '🎰', 'color': '#ffff00'},
-    'SUPER_JACKPOT': {'min_levels': 5, 'min_alignment': 100, 'emoji': '💰', 'color': '#00ffff'},
-    'JACKPOT': {'min_levels': 4, 'min_alignment': 100, 'emoji': '🍀', 'color': '#00ff88'},
-    'BIG_WIN': {'min_levels': 3, 'min_alignment': 100, 'emoji': '⭐', 'color': '#88ff88'},
-}
 
 
 @dataclass
 class Config:
     symbols: List[str] = field(default_factory=lambda: [
-        "SPY", "QQQ", "AAPL", "NVDA", "TSLA",
-        "AMD", "AMZN", "IWM", "SOFI", "PLTR",
-        "BAC", "F", "INTC", "GOOGL", "EEM",
-        "XLF", "MSFT", "T", "SOXL", "NIO",
-        "META", "TQQQ", "AAL", "SNAP", "CCL",
-        "SQQQ", "PFE", "SLV", "RIVN", "GOOG",
-        "MARA", "GDX", "UBER", "COIN", "VZ",
-        "WFC", "NFLX", "KO", "LCID", "HYG",
-        "RIOT", "PYPL", "EWZ", "KVUE", "DIS",
-        "VALE", "BABA", "CMCSA", "CSCO", "GM",
-        "EFA", "XLE", "MU", "HOOD", "TLT",
-        "PARA", "MPW", "C", "CLSK", "JPM",
-        "JNJ", "USO", "DAL", "WBA", "GRAB",
-        "FXI", "PBR", "GOLD", "AGNC", "VXX",
-        "AVGO", "JBLU", "XOM", "CVX", "SMCI",
-        "KMI", "SQ", "LQD", "SIRI", "XLU",
-        "XBI", "ARKK", "BMY", "ET", "PCG",
-        "KWEB", "UVXY", "TSM", "XLP", "SCHW",
-        "ABR", "PLUG", "DKNG", "HBAN", "GLD",
-        "LUV", "WBD", "NCLH", "RIG", "SHOP",
-        "SOXX", "UAL", "SPXS", "DVN", "MS",
-        "KEY", "ORCL", "XLI", "OXY", "IYR",
-        "VFC", "ROKU", "TFC", "AFRM", "ARM",
-        "HAL", "MO", "CLF", "WMT", "CHPT",
-        "FCX", "EMB", "VNQ", "PINS", "UPST",
-        "GILD", "ABBV", "USB", "NU", "PDD",
-        "QS", "SE", "ENVX", "RF", "JD",
-        "IAU", "SAVE", "SPXU", "KRE", "XLV",
-        "XLK", "MSOS", "WE", "SLB", "BRK.B",
-        "CRM", "MRK", "NKLA", "PENN", "GS",
-        "LI", "MGM", "UNH", "NEM", "BX",
-        "XPEV", "ABNB", "SMH", "BA", "COP",
-        "AG", "WYNN", "ENPH", "AXP", "PM",
-        "FSLR", "V", "MA", "IVV", "VOO",
-        "LRCX", "COST", "UPS", "OPEN", "SBUX",
-        "PANW", "ADBE", "MRVL", "ON", "IONQ",
-        "AEM", "CRWD", "NOW", "VRT", "RBLX",
-        "SPCE", "XLY", "PATH", "TXN", "NKE",
-        "DOW", "TELL", "FEZ", "QCOM", "ARKG",
-        "LOW", "VEA", "SNOW", "HD", "ANET",
-        "SEDG", "BTU", "CAT", "DG", "MMM",
-        "LABU", "SOXS", "GDXJ", "DASH", "MPC",
-        "PSX", "CRSP", "FITB", "CZR", "BP",
-        "LYFT", "LVS", "ASML", "SPOT", "EBAY",
-        "MDT", "CVS", "RTX", "MTCH", "SWAV",
-        "RKLB", "LLY", "HON", "QID", "TMF",
-        "SPWR", "APA", "EOSE", "BTI", "ZIM",
-        "AFL", "EQT", "VLO", "BKR", "SGEN",
-        "MRNA", "Z", "MRO", "TBT", "DE",
-        "LUMN", "AIG", "IEF", "TEVA", "ZS",
-        "APE", "CF", "TJX", "SWN", "CELH",
-        "BITO", "CMG", "TTWO", "AR", "IBB",
-        "U", "GE", "SRTY", "DHR", "STLA",
-        "CL", "ALLY", "VGK", "APD", "XHB",
-        "WPM", "BILI", "STX", "ETSY", "CPNG",
-        "IMGN", "LAZR", "PG", "SNDL", "TTD",
-        "NET", "AMC", "ADM", "DDOG", "MDB",
-        "WDAY", "DELL", "STNG", "TWLO", "OKTA",
-        "SKLZ", "DOCU", "SU", "GSAT", "ZION",
-        "FUBO", "CHWY", "WDC", "XOP", "BLK",
-        "TLRY", "CNC", "PEP", "BIDU", "ROKU",
-        "ZM", "EL", "CARR", "FDX", "UEC",
-        "ASTS", "CIG", "URA", "IP", "HPE",
-        "CNP", "SYF", "TRMB", "ILMN", "TMO",
-        "AZN", "AMGN", "PXD", "REGN", "ISRG",
-        "RCL", "LEN", "TAL", "GPN", "D",
-        "CTRA", "SO", "NEE", "DUK", "AEP",
-        "SRE", "EXC", "VICI", "SPG", "O",
-        "AMT", "CCI", "PLD", "WELL", "DLR",
-        "EQIX", "PSA", "SBAC", "ARE", "AVB",
-        "ARES", "KKR", "APO", "GDDY", "VEEV",
-        "ZTO", "VMW", "HPQ", "SBNY", "WHR",
-        "CNX", "EDR", "NYCB", "COTY", "RUN",
-        "GIS", "CPB", "HST", "IQ", "XRT",
-        "JETS", "ARKF", "TNA", "TZA", "SPXL",
-        "SPHD", "SCHD", "VTI", "IEMG", "AGG",
-        "BND", "VCIT", "JNK", "IGSB", "MBB",
-        "XLC", "XLRE", "XME", "AMLP", "KBE",
-        "ITB", "XLB", "XSW", "HACK", "BOIL",
-        "UNG", "KOLD", "WEAT", "DBA", "REMX",
-        "ARGT", "EPI", "INDA", "MCHI", "TUR",
-        "RSX", "GDX", "SILJ", "JNUG", "NUGT",
-        "DUST", "LABD", "TECS", "TECL", "FAS",
-        "FAZ", "ERX", "ERY", "DRIP", "GUSH",
-        "NAIL", "DRV", "CURE", "EDC", "EDZ",
-        "YANG", "YINN", "DPST", "WEBL", "WEBS",
-        "FNGU", "FNGD", "BULZ", "BERZ", "SPDN",
-        "SDS", "SSO", "UPRO", "QLD", "PSQ",
-        "DOG", "DXD", "DDM", "UWM", "TWM",
-        "RWM", "URTY", "VIXY", "SVXY", "VXZ",
-        "GOVT", "SHY", "IEI", "TIP", "VMBS",
-        "SPLV", "USMV", "MTUM", "QUAL", "VLUE"
+        "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLU", "XLK",
+        "XLP", "XLB", "XLV", "XLI", "XLY", "XLC", "XLRE", "KRE",
+        "SMH", "XBI", "GDX",
+        'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META',
+        'TSLA', 'AVGO', 'ORCL', 'ADBE', 'CRM', 'AMD', 'INTC', 'CSCO'
     ])
     etf_symbols: List[str] = field(default_factory=lambda: [
         "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLU", "XLK",
@@ -151,8 +53,8 @@ class Config:
         0.000625, 0.00125, 0.0025, 0.005, 0.0075, 0.01, 0.0125,
         0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.10
     ])
-    pm_thresholds: List[float] = field(default_factory=lambda: [
-        0.000625, 0.00125, 0.0025, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.10
+    am_thresholds: List[float] = field(default_factory=lambda: [
+        0.005, 0.0075, 0.01, 0.0125, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05
     ])
     update_interval_ms: int = 1000
     cache_refresh_interval: float = 0.5
@@ -162,12 +64,16 @@ class Config:
     polygon_rest_url: str = "https://api.polygon.io"
     volumes: Dict[str, float] = field(default_factory=dict)
     week52_data: Dict[str, Dict] = field(default_factory=dict)
+    fundamental_data: Dict[str, Dict] = field(default_factory=dict)
+    fundamental_slopes: Dict[str, Dict] = field(default_factory=dict)
+    correlation_data: Dict[str, Dict] = field(default_factory=dict)
     min_tradable_stasis: int = 3
+    # minimum quarters needed for correlation window
+    corr_window_quarters: int = 5
 
 
 config = Config()
 config.symbols = list(dict.fromkeys(config.symbols))
-
 
 # ============================================================================
 # ENUMS & DATA CLASSES
@@ -232,120 +138,618 @@ def calculate_52week_percentile(price, symbol):
     return max(0, min(100, ((price - l) / r) * 100))
 
 
+def fmt_slope(v):
+    return "—" if v is None else f"{'+' if v >= 0 else ''}{v * 100:.1f}%"
+
+
 def fmt_rr(rr):
     if rr is None:
         return "—"
     return "0:1" if rr <= 0 else (f"{rr:.2f}:1" if rr < 10 else f"{rr:.0f}:1")
 
 
+def fmt_corr(v):
+    """Format correlation value for display."""
+    if v is None:
+        return "—"
+    return f"{v:+.3f}"
+
+
+def fmt_corr_delta(v):
+    """Format correlation delta — negative means decorrelating."""
+    if v is None:
+        return "—"
+    arrow = "↘" if v < -0.05 else ("↗" if v > 0.05 else "→")
+    return f"{arrow}{v:+.3f}"
+
+
 # ============================================================================
-# PORTFOLIO
+# PRICE:REVENUE CORRELATION ENGINE
 # ============================================================================
 
 
-class Portfolio:
-    def __init__(self, starting_balance=STARTING_BALANCE):
-        self.balance = starting_balance
-        self.starting_balance = starting_balance
-        self.positions: Dict[str, Dict] = {}
-        self.trade_history: List[Dict] = []
-        self.total_realized_pnl = 0.0
-        self.winning_trades = 0
-        self.losing_trades = 0
-        self._lock = threading.Lock()
+def fetch_quarterly_prices_for_correlation(symbol: str, num_quarters: int = 8) -> Dict:
+    """
+    Fetch quarterly closing prices aligned to fiscal quarter-end dates.
+    Returns dict with 'dates' and 'prices' lists (oldest first).
+    
+    We get the price at each quarter-end to align with revenue reporting.
+    """
+    try:
+        end = datetime.now()
+        # Go back enough time to cover requested quarters plus buffer
+        start = end - timedelta(days=num_quarters * 100)
+        
+        url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/month/"
+               f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+               f"?adjusted=true&sort=asc&limit=200&apiKey={config.polygon_api_key}")
+        
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return {}
+        
+        results = resp.json().get('results', [])
+        if not results:
+            return {}
+        
+        # Build monthly price map: (year, month) -> close_price
+        monthly_prices = {}
+        for bar in results:
+            dt = datetime.fromtimestamp(bar['t'] / 1000)
+            monthly_prices[(dt.year, dt.month)] = bar['c']
+        
+        return monthly_prices
+        
+    except Exception as e:
+        print(f"   ⚠️ Price fetch for correlation failed {symbol}: {e}")
+        return {}
 
-    def place_bet(self, symbol, side, amount, buy_price, sell_price, direction, stock_price):
-        with self._lock:
-            if amount <= 0:
-                return {'success': False, 'error': 'Invalid amount'}
-            if amount > self.balance:
-                return {'success': False, 'error': f'Insufficient (${self.balance:.2f})'}
-            entry_price = buy_price if side == 'YES' else sell_price
-            if entry_price <= 0:
-                return {'success': False, 'error': 'Invalid price'}
-            shares = amount / entry_price
-            pid = f"{symbol}_{side}_{uuid.uuid4().hex[:6]}"
-            self.positions[pid] = {
-                'id': pid, 'symbol': symbol, 'side': side, 'direction': direction,
-                'shares': shares, 'entry_price': entry_price, 'cost_basis': amount,
-                'stock_price_at_entry': stock_price, 'entry_time': datetime.now(),
-            }
-            self.balance -= amount
-            self.trade_history.append({
-                'id': uuid.uuid4().hex[:8], 'position_id': pid, 'symbol': symbol,
-                'side': side, 'direction': direction, 'action': 'BUY',
-                'amount': amount, 'shares': shares, 'price': entry_price,
-                'timestamp': datetime.now(),
-            })
-            return {'success': True, 'position_id': pid, 'new_balance': self.balance}
 
-    def close_position(self, position_id, current_buy, current_sell):
-        with self._lock:
-            if position_id not in self.positions:
-                return {'success': False, 'error': 'Not found'}
-            pos = self.positions[position_id]
-            exit_price = current_sell if pos['side'] == 'YES' else (1.0 - current_buy)
-            proceeds = pos['shares'] * exit_price
-            pnl = proceeds - pos['cost_basis']
-            self.balance += proceeds
-            self.total_realized_pnl += pnl
-            if pnl >= 0:
-                self.winning_trades += 1
+def get_price_at_quarter_end(monthly_prices: Dict, filing_date_str: str) -> Optional[float]:
+    """
+    Given a filing date string and monthly price data,
+    find the price closest to (but not after) the filing date.
+    Falls back to the month of filing or month before.
+    """
+    if not filing_date_str or not monthly_prices:
+        return None
+    
+    try:
+        fd = datetime.strptime(filing_date_str[:10], '%Y-%m-%d')
+        
+        # Try exact month first
+        key = (fd.year, fd.month)
+        if key in monthly_prices:
+            return monthly_prices[key]
+        
+        # Try previous month
+        prev = fd - timedelta(days=30)
+        key = (prev.year, prev.month)
+        if key in monthly_prices:
+            return monthly_prices[key]
+        
+        # Try month before that
+        prev2 = fd - timedelta(days=60)
+        key = (prev2.year, prev2.month)
+        if key in monthly_prices:
+            return monthly_prices[key]
+        
+        return None
+    except:
+        return None
+
+
+def calculate_price_revenue_correlation(symbol: str) -> Dict:
+    """
+    Calculate the rolling 5-quarter correlation between price and revenue,
+    then measure the most recent quarter's impact on the correlation.
+    
+    Returns:
+        {
+            'corr_5q': float,           # Current 5-quarter correlation
+            'corr_4q_prev': float,      # Previous 4-quarter correlation (excluding latest)
+            'corr_delta': float,         # Change: corr_5q - corr_4q_prev (negative = decorrelating)
+            'decorrelation_score': float, # 0-1 score, higher = more decorrelated
+            'price_vs_rev_divergence': str, # 'PRICE_AHEAD' | 'PRICE_BEHIND' | 'ALIGNED'
+            'quarters_available': int,
+            'latest_rev_change_pct': float,
+            'latest_price_change_pct': float,
+            'correlation_history': list,  # Rolling correlation values
+        }
+    """
+    result = {
+        'corr_5q': None,
+        'corr_4q_prev': None,
+        'corr_delta': None,
+        'decorrelation_score': None,
+        'price_vs_rev_divergence': None,
+        'quarters_available': 0,
+        'latest_rev_change_pct': None,
+        'latest_price_change_pct': None,
+        'correlation_history': [],
+    }
+    
+    # Get fundamental data (already fetched)
+    fund = config.fundamental_data.get(symbol)
+    if not fund:
+        return result
+    
+    revenues = fund.get('revenue', [])
+    dates = fund.get('dates', [])
+    
+    if len(revenues) < config.corr_window_quarters:
+        return result
+    
+    # Fetch monthly prices for this symbol
+    monthly_prices = fetch_quarterly_prices_for_correlation(symbol, len(revenues) + 2)
+    if not monthly_prices:
+        return result
+    
+    # Align prices to each quarter's filing date
+    aligned_prices = []
+    aligned_revenues = []
+    aligned_dates = []
+    
+    for i in range(len(revenues)):
+        if i >= len(dates):
+            break
+        price = get_price_at_quarter_end(monthly_prices, dates[i])
+        rev = revenues[i]
+        
+        if price is not None and rev is not None and rev != 0:
+            aligned_prices.append(price)
+            aligned_revenues.append(rev)
+            aligned_dates.append(dates[i])
+    
+    n = len(aligned_prices)
+    result['quarters_available'] = n
+    
+    if n < config.corr_window_quarters:
+        return result
+    
+    # Convert to numpy arrays for correlation
+    prices_arr = np.array(aligned_prices, dtype=float)
+    revs_arr = np.array(aligned_revenues, dtype=float)
+    
+    # --- Calculate rolling correlations ---
+    window = config.corr_window_quarters
+    rolling_corrs = []
+    
+    for end_idx in range(window, n + 1):
+        start_idx = end_idx - window
+        p_window = prices_arr[start_idx:end_idx]
+        r_window = revs_arr[start_idx:end_idx]
+        
+        # Check for zero variance
+        if np.std(p_window) < 1e-10 or np.std(r_window) < 1e-10:
+            rolling_corrs.append(None)
+            continue
+        
+        corr = np.corrcoef(p_window, r_window)[0, 1]
+        if np.isnan(corr):
+            rolling_corrs.append(None)
+        else:
+            rolling_corrs.append(round(float(corr), 4))
+    
+    result['correlation_history'] = rolling_corrs
+    
+    # --- Current 5-quarter correlation (most recent window) ---
+    if rolling_corrs and rolling_corrs[-1] is not None:
+        result['corr_5q'] = rolling_corrs[-1]
+    
+    # --- Previous correlation EXCLUDING the most recent quarter ---
+    # This is the 4-quarter correlation using quarters [n-5 : n-1]
+    if n >= window:
+        p_prev = prices_arr[-(window):-1]  # exclude last quarter
+        r_prev = revs_arr[-(window):-1]
+        
+        if len(p_prev) >= 4 and np.std(p_prev) > 1e-10 and np.std(r_prev) > 1e-10:
+            corr_prev = np.corrcoef(p_prev, r_prev)[0, 1]
+            if not np.isnan(corr_prev):
+                result['corr_4q_prev'] = round(float(corr_prev), 4)
+    
+    # --- Correlation delta: how did the latest quarter change things? ---
+    if result['corr_5q'] is not None and result['corr_4q_prev'] is not None:
+        result['corr_delta'] = round(
+            result['corr_5q'] - result['corr_4q_prev'], 4
+        )
+    
+    # --- Latest quarter's individual changes ---
+    if n >= 2:
+        rev_prev = aligned_revenues[-2]
+        rev_curr = aligned_revenues[-1]
+        if rev_prev and rev_prev != 0:
+            result['latest_rev_change_pct'] = round(
+                ((rev_curr - rev_prev) / abs(rev_prev)) * 100, 2
+            )
+        
+        price_prev = aligned_prices[-2]
+        price_curr = aligned_prices[-1]
+        if price_prev and price_prev != 0:
+            result['latest_price_change_pct'] = round(
+                ((price_curr - price_prev) / abs(price_prev)) * 100, 2
+            )
+    
+    # --- Decorrelation Score (0 to 1, higher = more decorrelated) ---
+    # Combines: low absolute correlation + negative correlation delta
+    corr_5q = result['corr_5q']
+    corr_delta = result['corr_delta']
+    
+    if corr_5q is not None:
+        # Component 1: How low is the absolute correlation? (0-0.5 score)
+        # corr of 1.0 = 0 points, corr of 0.0 = 0.5 points, corr of -1.0 = 0.5 points
+        abs_decorr = max(0, (1.0 - abs(corr_5q)) * 0.5)
+        
+        # Component 2: Is correlation dropping? (0-0.5 score)
+        # delta of -1.0 = 0.5 points, delta of 0 = 0 points
+        delta_score = 0.0
+        if corr_delta is not None:
+            # Negative delta = decorrelating = good score
+            delta_score = max(0, min(0.5, (-corr_delta) * 0.5))
+        
+        result['decorrelation_score'] = round(abs_decorr + delta_score, 4)
+    
+    # --- Price vs Revenue divergence direction ---
+    if (result['latest_rev_change_pct'] is not None and 
+            result['latest_price_change_pct'] is not None):
+        rev_chg = result['latest_rev_change_pct']
+        price_chg = result['latest_price_change_pct']
+        
+        # Price growing much faster than revenue
+        if price_chg > rev_chg + 10:
+            result['price_vs_rev_divergence'] = 'PRICE_AHEAD'
+        # Revenue growing much faster than price
+        elif rev_chg > price_chg + 10:
+            result['price_vs_rev_divergence'] = 'PRICE_BEHIND'
+        else:
+            result['price_vs_rev_divergence'] = 'ALIGNED'
+    
+    return result
+
+
+def calculate_all_correlations():
+    """
+    Calculate price:revenue correlations for all non-ETF symbols.
+    ETFs don't have revenue, so they're skipped.
+    """
+    print("\n📊 CALCULATING PRICE:REVENUE CORRELATIONS...")
+    ok = fail = skip = 0
+    
+    for i, sym in enumerate(config.symbols):
+        # Skip ETFs — they don't have revenue
+        if sym in config.etf_symbols:
+            skip += 1
+            continue
+        
+        # Skip if no fundamental data
+        if sym not in config.fundamental_data:
+            skip += 1
+            continue
+        
+        try:
+            corr_data = calculate_price_revenue_correlation(sym)
+            config.correlation_data[sym] = corr_data
+            
+            if corr_data['corr_5q'] is not None:
+                ok += 1
+                delta_str = fmt_corr_delta(corr_data.get('corr_delta'))
+                if corr_data.get('decorrelation_score', 0) > 0.3:
+                    print(f"   🔔 {sym}: corr={corr_data['corr_5q']:.3f} "
+                          f"delta={delta_str} "
+                          f"decor={corr_data['decorrelation_score']:.3f} "
+                          f"({corr_data.get('price_vs_rev_divergence', '?')})")
             else:
-                self.losing_trades += 1
-            self.trade_history.append({
-                'id': uuid.uuid4().hex[:8], 'position_id': position_id,
-                'symbol': pos['symbol'], 'side': pos['side'], 'direction': pos['direction'],
-                'action': 'CLOSE', 'shares': pos['shares'], 'entry_price': pos['entry_price'],
-                'exit_price': exit_price, 'pnl': pnl,
-                'pnl_pct': (pnl / pos['cost_basis'] * 100) if pos['cost_basis'] > 0 else 0,
-                'timestamp': datetime.now(),
-            })
-            del self.positions[position_id]
-            return {'success': True, 'pnl': pnl, 'new_balance': self.balance}
-
-    def get_stats(self, market_prices=None):
-        with self._lock:
-            unrealized = 0.0
-            positions_value = 0.0
-            if market_prices:
-                for pid, pos in self.positions.items():
-                    m = market_prices.get(pos['symbol'], {})
-                    if pos['side'] == 'YES':
-                        val = pos['shares'] * m.get('sell_price', pos['entry_price'])
-                    else:
-                        val = pos['shares'] * (1.0 - m.get('buy_price', 1.0 - pos['entry_price']))
-                    positions_value += val
-                    unrealized += val - pos['cost_basis']
-            total_trades = self.winning_trades + self.losing_trades
-            return {
-                'balance': self.balance,
-                'portfolio_value': self.balance + positions_value,
-                'unrealized_pnl': unrealized,
-                'total_pnl': self.total_realized_pnl + unrealized,
-                'positions_count': len(self.positions),
-                'win_rate': (self.winning_trades / total_trades * 100) if total_trades > 0 else 0,
-            }
-
-    def get_positions_list(self):
-        with self._lock:
-            return list(self.positions.values())
-
-    def get_recent_trades(self, n=10):
-        with self._lock:
-            return list(reversed(self.trade_history[-n:]))
-
-    def reset(self):
-        with self._lock:
-            self.balance = self.starting_balance
-            self.positions.clear()
-            self.trade_history.clear()
-            self.total_realized_pnl = 0.0
-            self.winning_trades = 0
-            self.losing_trades = 0
+                fail += 1
+        except Exception as e:
+            print(f"   ⚠️ {sym} correlation error: {e}")
+            fail += 1
+        
+        if (i + 1) % 10 == 0:
+            print(f"   📈 Correlations: {i + 1}/{len(config.symbols)} "
+                  f"(✓{ok} ✗{fail} ⏭{skip})")
+        
+        time.sleep(0.15)  # Rate limiting
+    
+    print(f"✅ Correlations: {ok} calculated, {fail} failed, {skip} skipped\n")
 
 
-portfolio = Portfolio()
+# ============================================================================
+# FUNDAMENTAL DATA
+# ============================================================================
+
+
+def fetch_fundamental_data_polygon(sym):
+    try:
+        url = (f"{config.polygon_rest_url}/vX/reference/financials"
+               f"?ticker={sym}&timeframe=quarterly&limit=24"
+               f"&sort=filing_date&order=desc&apiKey={config.polygon_api_key}")
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200:
+            return None
+        results = resp.json().get('results', [])
+        if not results:
+            return None
+        fund = {k: [] for k in [
+            'dates', 'revenue', 'net_income', 'operating_cash_flow',
+            'capex', 'fcf', 'total_assets', 'total_liabilities',
+            'shareholders_equity', 'current_assets', 'current_liabilities',
+            'total_debt', 'eps']}
+        for r in results:
+            try:
+                fi = r.get('financials', {})
+                inc = fi.get('income_statement', {})
+                cf = fi.get('cash_flow_statement', {})
+                bs = fi.get('balance_sheet', {})
+                rev = inc.get('revenues', {}).get('value', 0) or 0
+                ni = inc.get('net_income_loss', {}).get('value', 0) or 0
+                eps = inc.get('basic_earnings_per_share', {}).get('value', 0) or 0
+                ocf = cf.get('net_cash_flow_from_operating_activities', {}).get('value', 0) or 0
+                cx = cf.get('net_cash_flow_from_investing_activities', {}).get('value', 0) or 0
+                ta = bs.get('assets', {}).get('value', 0) or 0
+                tl = bs.get('liabilities', {}).get('value', 0) or 0
+                eq = bs.get('equity', {}).get('value', 0) or 0
+                ca = bs.get('current_assets', {}).get('value', 0) or 0
+                cl = bs.get('current_liabilities', {}).get('value', 0) or 0
+                ltd = bs.get('long_term_debt', {}).get('value', 0) or 0
+                std = bs.get('short_term_debt', {}).get('value', 0) or 0
+                fund['dates'].append(r.get('filing_date', ''))
+                fund['revenue'].append(rev)
+                fund['net_income'].append(ni)
+                fund['operating_cash_flow'].append(ocf)
+                fund['capex'].append(abs(cx))
+                fund['fcf'].append(ocf + cx)
+                fund['total_assets'].append(ta)
+                fund['total_liabilities'].append(tl)
+                fund['shareholders_equity'].append(eq)
+                fund['current_assets'].append(ca)
+                fund['current_liabilities'].append(cl)
+                fund['total_debt'].append(ltd + std)
+                fund['eps'].append(eps)
+            except:
+                continue
+        for k in fund:
+            fund[k] = fund[k][::-1]
+        return fund
+    except:
+        return None
+
+
+def calculate_slopes(series, ss=4, sl=20):
+    if not series or len(series) < 5:
+        return None, None
+    s = pd.Series(series).replace([np.inf, -np.inf], np.nan)
+    s5 = s20 = None
+    try:
+        if len(s.dropna()) >= 5:
+            e = s.ewm(span=ss, adjust=False).mean()
+            if abs(e.iloc[-5]) > 0.0001:
+                s5 = (e.iloc[-1] - e.iloc[-5]) / abs(e.iloc[-5])
+    except:
+        pass
+    try:
+        if len(s.dropna()) >= 21:
+            e = s.ewm(span=sl, adjust=False).mean()
+            if abs(e.iloc[-21]) > 0.0001:
+                s20 = (e.iloc[-1] - e.iloc[-21]) / abs(e.iloc[-21])
+    except:
+        pass
+    return s5, s20
+
+
+def calculate_all_slopes(fund, ratios):
+    sl = {}
+    sl['Rev_Slope_5'], sl['Rev_Slope_20'] = calculate_slopes(fund.get('revenue', []))
+    sl['FCF_Slope_5'], sl['FCF_Slope_20'] = calculate_slopes(fund.get('fcf', []))
+    for n, k in [('P/E Ratio', 'pe_ratio'), ('Return on Equity', 'roe'),
+                 ('Net Profit Margin', 'net_profit_margin'),
+                 ('Debt to Equity Ratio', 'debt_to_equity')]:
+        sl[f'{n}_Slope_5'], sl[f'{n}_Slope_20'] = calculate_slopes(ratios.get(k, []))
+    fl = ratios.get('fcfy', [])
+    sl['FCFY'] = fl[-1] if fl and fl[-1] is not None else None
+    return sl
+
+
+def fetch_all_fundamental_data():
+    print("\n📊 FETCHING FUNDAMENTAL DATA...")
+    ok = fail = 0
+    for i, sym in enumerate(config.symbols):
+        try:
+            fund = fetch_fundamental_data_polygon(sym)
+            if fund and len(fund.get('revenue', [])) >= 4:
+                price = 100
+                w = config.week52_data.get(sym, {})
+                if w.get('high') and w.get('low'):
+                    price = (w['high'] + w['low']) / 2
+                eq = fund['shareholders_equity'][-1]
+                mcap = eq * 2 if eq and eq > 0 else 1e9
+                ratios = {k: [] for k in ['pe_ratio', 'roe', 'net_profit_margin',
+                                           'debt_to_equity', 'fcfy']}
+                for j in range(len(fund['revenue'])):
+                    try:
+                        eps = fund['eps'][j]
+                        ratios['pe_ratio'].append(price / eps if eps > 0 else None)
+                        eq_j = fund['shareholders_equity'][j]
+                        ratios['roe'].append(fund['net_income'][j] / eq_j if eq_j > 0 else None)
+                        rev_j = fund['revenue'][j]
+                        ratios['net_profit_margin'].append(
+                            fund['net_income'][j] / rev_j if rev_j else None)
+                        ratios['debt_to_equity'].append(
+                            fund['total_debt'][j] / eq_j if eq_j > 0 else None)
+                        if j >= 3:
+                            ratios['fcfy'].append(
+                                sum(fund['fcf'][max(0, j - 3):j + 1]) / mcap if mcap else None)
+                        else:
+                            ratios['fcfy'].append(None)
+                    except:
+                        for k in ratios:
+                            ratios[k].append(None)
+                slopes = calculate_all_slopes(fund, ratios)
+                config.fundamental_data[sym] = fund
+                config.fundamental_slopes[sym] = slopes
+                ok += 1
+            else:
+                fail += 1
+        except:
+            fail += 1
+        if (i + 1) % 25 == 0:
+            print(f"   📈 {i + 1}/{len(config.symbols)} (✓{ok} ✗{fail})")
+        time.sleep(0.15)
+    print(f"✅ Fundamentals: {ok} ok, {fail} failed\n")
+
+
+# ============================================================================
+# MERIT SCORING (UPDATED WITH CORRELATION)
+# ============================================================================
+
+
+def calculate_stasis_merit_score(snap):
+    ms = 0
+    st = snap.get('stasis', 0)
+    for t, p in [(15, 10), (12, 9), (10, 8), (8, 7), (7, 6),
+                 (6, 5), (5, 4), (4, 3), (3, 2), (2, 1)]:
+        if st >= t:
+            ms += p
+            break
+    rr = snap.get('risk_reward')
+    if rr:
+        for t, p in [(3, 5), (2.5, 4), (2, 3), (1.5, 2), (1, 1)]:
+            if rr >= t:
+                ms += p
+                break
+    ms += {'VERY_STRONG': 4, 'STRONG': 3, 'MODERATE': 2, 'WEAK': 1}.get(
+        snap.get('signal_strength', ''), 0)
+    dur = snap.get('duration_seconds', 0)
+    if dur >= 3600:
+        ms += 3
+    elif dur >= 1800:
+        ms += 2
+    elif dur >= 900:
+        ms += 1
+    return ms
+
+
+def calculate_correlation_merit_score(symbol: str, direction: Optional[str]) -> Tuple[int, Dict]:
+    """
+    Calculate merit score contribution from price:revenue decorrelation.
+    
+    Scoring logic:
+    - High decorrelation score: up to +6 points
+    - Correlation delta (how fast it's decorrelating): up to +4 points  
+    - Direction alignment bonus: up to +3 points
+      * If PRICE_BEHIND and direction=LONG → bonus (price should catch up)
+      * If PRICE_AHEAD and direction=SHORT → bonus (price should correct)
+    
+    Returns: (score, details_dict)
+    """
+    score = 0
+    details = {
+        'corr_5q': None,
+        'corr_delta': None,
+        'decor_score': None,
+        'divergence': None,
+        'corr_merit': 0,
+    }
+    
+    corr = config.correlation_data.get(symbol)
+    if not corr or corr.get('corr_5q') is None:
+        return score, details
+    
+    details['corr_5q'] = corr['corr_5q']
+    details['corr_delta'] = corr.get('corr_delta')
+    details['decor_score'] = corr.get('decorrelation_score')
+    details['divergence'] = corr.get('price_vs_rev_divergence')
+    details['latest_rev_chg'] = corr.get('latest_rev_change_pct')
+    details['latest_price_chg'] = corr.get('latest_price_change_pct')
+    
+    # --- Component 1: Decorrelation Score (0-1) → 0-6 points ---
+    decor = corr.get('decorrelation_score', 0) or 0
+    for threshold, points in [
+        (0.7, 6), (0.55, 5), (0.4, 4), (0.3, 3), (0.2, 2), (0.1, 1)
+    ]:
+        if decor >= threshold:
+            score += points
+            break
+    
+    # --- Component 2: Correlation Delta (rate of decorrelation) → 0-4 points ---
+    delta = corr.get('corr_delta')
+    if delta is not None:
+        # More negative delta = faster decorrelation = more points
+        for threshold, points in [
+            (-0.4, 4), (-0.25, 3), (-0.15, 2), (-0.05, 1)
+        ]:
+            if delta <= threshold:
+                score += points
+                break
+    
+    # --- Component 3: Direction Alignment Bonus → 0-3 points ---
+    divergence = corr.get('price_vs_rev_divergence')
+    if divergence and direction:
+        # Price lagging behind revenue growth + LONG signal = strong buy signal
+        if divergence == 'PRICE_BEHIND' and direction == 'LONG':
+            score += 3
+        # Price running ahead of revenue + SHORT signal = strong sell signal
+        elif divergence == 'PRICE_AHEAD' and direction == 'SHORT':
+            score += 3
+        # Misaligned: price ahead but going long, or price behind but shorting
+        elif divergence == 'PRICE_AHEAD' and direction == 'LONG':
+            score -= 1  # Slight penalty
+        elif divergence == 'PRICE_BEHIND' and direction == 'SHORT':
+            score -= 1  # Slight penalty
+    
+    details['corr_merit'] = max(0, score)  # Floor at 0
+    return max(0, score), details
+
+
+def calculate_fundamental_merit_score(symbol, w52_pct):
+    ms = 0
+    sd = {}
+    slopes = config.fundamental_slopes.get(symbol, {})
+    if not slopes:
+        if w52_pct is not None:
+            for t, p in [(5, 8), (15, 7), (25, 6), (35, 5), (45, 4),
+                         (55, 3), (65, 2), (75, 1)]:
+                if w52_pct <= t:
+                    ms += p
+                    break
+        return ms, sd
+    for lbl, key, tps in [
+        ('Rev_5', 'Rev_Slope_5', [(0.30, 4), (0.20, 3), (0.10, 2), (0.05, 1)]),
+        ('FCF_5', 'FCF_Slope_5', [(0.40, 4), (0.25, 3), (0.10, 2), (0.05, 1)]),
+        ('ROE_5', 'Return on Equity_Slope_5', [(0.20, 2), (0.10, 1)]),
+        ('NPM_5', 'Net Profit Margin_Slope_5', [(0.20, 2), (0.10, 1)])]:
+        v = slopes.get(key)
+        sd[lbl] = v
+        if v is not None:
+            for t, p in tps:
+                if v >= t:
+                    ms += p
+                    break
+    for lbl, key, tps in [
+        ('PE_5', 'P/E Ratio_Slope_5', [(-0.25, 3), (-0.15, 2), (-0.05, 1)]),
+        ('DE_5', 'Debt to Equity Ratio_Slope_5', [(-0.20, 2), (-0.10, 1)])]:
+        v = slopes.get(key)
+        sd[lbl] = v
+        if v is not None:
+            for t, p in tps:
+                if v <= t:
+                    ms += p
+                    break
+    if w52_pct is not None:
+        for t, p in [(5, 8), (15, 7), (25, 6), (35, 5), (45, 4),
+                     (55, 3), (65, 2), (75, 1)]:
+            if w52_pct <= t:
+                ms += p
+                break
+    fcfy = slopes.get('FCFY')
+    sd['FCFY'] = fcfy
+    if fcfy is not None:
+        if fcfy >= 0.15:
+            ms += 3
+        elif fcfy >= 0.10:
+            ms += 2
+        elif fcfy >= 0.05:
+            ms += 1
+    return ms, sd
 
 
 # ============================================================================
@@ -513,7 +917,7 @@ class Bitstream:
         elif prev >= 2 and sc < 2:
             self.stasis_info = None
         if sc >= 2:
-            self.direction = Direction.LONG if self.last_bit == 1 else Direction.SHORT
+            self.direction = Direction.LONG if self.last_bit == 0 else Direction.SHORT
             if sc >= 10:
                 self.signal_strength = SignalStrength.VERY_STRONG
             elif sc >= 7:
@@ -533,6 +937,9 @@ class Bitstream:
             p = live_price if live_price is not None else self.current_live_price
             si = self.stasis_info
             tp = sl = rr = None
+            distance_to_tp_pct = distance_to_sl_pct = stasis_price_change_pct = None
+            if si is not None:
+                stasis_price_change_pct = si.get_price_change_pct(p)
             if self.direction and self.current_stasis >= 2:
                 if self.direction == Direction.LONG:
                     tp, sl = self.upper_band, self.lower_band
@@ -544,18 +951,26 @@ class Bitstream:
                     rr = reward / risk
                 elif risk > 0:
                     rr = 0.0
+                if p > 0:
+                    distance_to_tp_pct = (abs(tp - p) / p) * 100
+                    distance_to_sl_pct = (abs(sl - p) / p) * 100
             return {
                 'symbol': self.symbol, 'is_etf': self.is_etf,
                 'threshold': self.threshold, 'threshold_pct': self.threshold * 100,
                 'stasis': self.current_stasis, 'total_bits': self.total_bits,
-                'current_price': p,
+                'current_price': p, 'anchor_price': si.start_price if si else None,
                 'direction': self.direction.value if self.direction else None,
                 'signal_strength': self.signal_strength.value if self.signal_strength else None,
                 'is_tradable': (self.current_stasis >= config.min_tradable_stasis
                                 and self.direction is not None and self.volume > 1.0),
+                'stasis_start_str': si.get_start_date_str() if si else "—",
                 'stasis_duration_str': si.get_duration_str() if si else "—",
                 'duration_seconds': si.get_duration().total_seconds() if si else 0,
+                'stasis_price_change_pct': stasis_price_change_pct,
                 'take_profit': tp, 'stop_loss': sl, 'risk_reward': rr,
+                'distance_to_tp_pct': distance_to_tp_pct,
+                'distance_to_sl_pct': distance_to_sl_pct,
+                'week52_percentile': calculate_52week_percentile(p, self.symbol),
                 'volume': self.volume,
             }
 
@@ -636,7 +1051,7 @@ price_feed = PolygonPriceFeed()
 
 
 # ============================================================================
-# BITSTREAM MANAGER
+# BITSTREAM MANAGER (UPDATED)
 # ============================================================================
 
 
@@ -645,8 +1060,7 @@ class BitstreamManager:
         self.lock = threading.Lock()
         self.streams: Dict[Tuple[str, float], Bitstream] = {}
         self.is_running = False
-        self.cached_pm_merit: Dict[str, Dict] = {}
-        self.cached_pm_market: Dict[str, Dict] = {}
+        self.cached_am_data: List[Dict] = []
         self.cache_lock = threading.Lock()
         self.initialized = False
         self.backfill_complete = False
@@ -710,650 +1124,413 @@ class BitstreamManager:
             with self.lock:
                 for s in self.streams.values():
                     snaps.append(s.get_snapshot(prices.get(s.symbol)))
-            pm_merit = self._calc_merit(snaps)
-            pm_market = {}
-            for sym, m in pm_merit.items():
-                pm_market[sym] = self._calc_market(m, prices.get(sym, 0))
+            am = self._build_am(snaps)
             with self.cache_lock:
-                self.cached_pm_merit = pm_merit
-                self.cached_pm_market = pm_market
+                self.cached_am_data = am
 
-    def _calc_merit(self, snaps):
-        WEIGHTS = {0.000625: 1, 0.00125: 1.5, 0.0025: 2, 0.005: 3,
-                   0.01: 5, 0.02: 8, 0.03: 12, 0.04: 16, 0.05: 20, 0.10: 30}
-        by_sym = defaultdict(list)
+    def _build_am(self, snaps):
+        rows = []
         for s in snaps:
-            if s['threshold'] in config.pm_thresholds:
-                by_sym[s['symbol']].append(s)
-        result = {}
-        for sym, ss in by_sym.items():
-            long_lvl, short_lvl, all_st = [], [], []
-            for snap in ss:
-                st = snap['stasis']
-                d = snap['direction']
-                th = snap['threshold']
-                all_st.append(st)
-                if st >= config.min_tradable_stasis and d:
-                    w = (st ** 1.3) * WEIGHTS.get(th, 1)
-                    (long_lvl if d == 'LONG' else short_lvl).append(
-                        {'thresh': th, 'stasis': st, 'weight': w})
-            lw = sum(l['weight'] for l in long_lvl)
-            sw = sum(l['weight'] for l in short_lvl)
-            tl = len(long_lvl) + len(short_lvl)
-            tw = lw + sw
-            if tl == 0:
-                result[sym] = {'stasis_levels': 0, 'dominant_direction': None,
-                               'direction_alignment': 0, 'weighted_score': 0,
-                               'max_stasis': max(all_st) if all_st else 0,
-                               'long_levels': 0, 'short_levels': 0}
+            if s['threshold'] not in config.am_thresholds:
                 continue
-            if lw > sw:
-                dd, nw = 'LONG', lw - sw
-            elif sw > lw:
-                dd, nw = 'SHORT', sw - lw
-            else:
-                dd, nw = None, 0
-            align = (max(lw, sw) / tw * 100) if tw > 0 else 0
-            score = nw * (1 + 0.2 * (tl - 1)) if align == 100 and tl >= 2 else nw
-            result[sym] = {
-                'stasis_levels': tl, 'dominant_direction': dd,
-                'direction_alignment': round(align, 0),
-                'weighted_score': round(max(0, score), 1),
-                'max_stasis': max(all_st) if all_st else 0,
-                'long_levels': len(long_lvl), 'short_levels': len(short_lvl),
-            }
-        return result
+            
+            sms = calculate_stasis_merit_score(s)
+            fms, sd = calculate_fundamental_merit_score(
+                s['symbol'], s.get('week52_percentile'))
+            
+            # Calculate correlation merit score
+            cms, cd = calculate_correlation_merit_score(
+                s['symbol'], s.get('direction'))
+            
+            # Total merit score now includes correlation
+            tms = sms + fms + cms
+            
+            rows.append({
+                **s,
+                'sms': sms,
+                'fms': fms,
+                'cms': cms,
+                'tms': tms,
+                'slope_details': sd,
+                'corr_details': cd,
+            })
+        return rows
 
-    def _calc_market(self, merit, stock_price):
-        levels = merit.get('stasis_levels', 0)
-        align = merit.get('direction_alignment', 0)
-        direction = merit.get('dominant_direction')
-        max_st = merit.get('max_stasis', 0)
-        score = merit.get('weighted_score', 0)
-        if levels == 0 or direction is None:
-            return {'probability': 0.50, 'buy_price': 0.50, 'sell_price': 0.50,
-                    'edge': 0, 'direction': None, 'payout': 1.0, 'tier': None,
-                    'emoji': '⬜', 'heat': 0, 'stock_price': stock_price}
-        base = 0.50
-        lc = min(0.30, levels * 0.04)
-        sc = min(0.10, max_st * 0.01)
-        wc = min(0.05, score / 1000)
-        if align == 100:
-            prob = base + lc + sc + wc
-        else:
-            prob = base + (lc * align / 100 * 0.5) + (sc * 0.5)
-        prob = max(0.52, min(0.95, prob))
-        spread = max(0.005, 0.02 - 0.01 * min(1, levels / 5))
-        buy = min(0.98, prob + spread / 2)
-        sell = max(0.02, 1 - prob + spread / 2)
-        edge = (prob - 0.50) * 100
-        payout = 1 / buy if buy > 0 else 1
-        heat = min(100, int((levels / 10) * 50 + (align / 100) * 30 + min(20, max_st * 2)))
-        tier, emoji = None, '⬜'
-        for tn, ti in JACKPOT_TIERS.items():
-            if levels >= ti['min_levels'] and align >= ti['min_alignment']:
-                tier, emoji = tn, ti['emoji']
-                break
-        return {'probability': round(prob, 4), 'buy_price': round(buy, 4),
-                'sell_price': round(sell, 4), 'edge': round(edge, 2),
-                'direction': direction, 'payout': round(payout, 2),
-                'tier': tier, 'emoji': emoji, 'heat': heat,
-                'stock_price': stock_price}
-
-    def get_pm_market(self):
+    def get_am_data(self):
         with self.cache_lock:
-            return copy.deepcopy(self.cached_pm_market)
-
-    def get_pm_merit(self):
-        with self.cache_lock:
-            return copy.deepcopy(self.cached_pm_merit)
+            return copy.deepcopy(self.cached_am_data)
 
 
 manager = BitstreamManager()
 
-
 # ============================================================================
-# DASH APP
+# DASH APP (UPDATED WITH CORRELATION COLUMNS & FILTERS)
 # ============================================================================
 
-PM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+AM_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600&display=swap');
-body { background: linear-gradient(180deg, #0a0a12 0%, #10101e 50%, #0a0a12 100%) !important; }
+body { background: #f5f0e8 !important; }
 .title-font { font-family: 'Orbitron', sans-serif !important; }
-.neon-green { color: #00ff88; text-shadow: 0 0 5px #00ff88; }
-.neon-cyan { color: #00ffff; text-shadow: 0 0 5px #00ffff; }
-.neon-gold { color: #ffd700; text-shadow: 0 0 5px #ffd700; }
-.pm-market-row {
-    background: rgba(18,18,34,0.95); border: 1px solid #2a2a4e;
-    border-radius: 5px; padding: 6px 10px; margin-bottom: 4px;
-    transition: border-color 0.15s;
-}
-.pm-market-row:hover { border-color: #00ffff; }
-.btn-yes {
-    background: linear-gradient(135deg, #00aa44, #00ff88) !important;
-    border: none !important; color: #000 !important;
-    font-weight: bold !important; font-size: 9px !important;
-    padding: 3px 8px !important; border-radius: 3px !important;
-}
-.btn-no {
-    background: linear-gradient(135deg, #aa2200, #ff4444) !important;
-    border: none !important; color: #fff !important;
-    font-weight: bold !important; font-size: 9px !important;
-    padding: 3px 8px !important; border-radius: 3px !important;
-}
-.btn-close-pos {
-    background: #444 !important; border: 1px solid #666 !important;
-    color: #fff !important; font-size: 8px !important; padding: 1px 6px !important;
-}
-.amount-btn {
-    background: #2a2a4e !important; border: 1px solid #444 !important;
-    color: #fff !important; font-size: 9px !important; padding: 3px 6px !important;
-    margin: 1px !important; border-radius: 3px !important;
-}
-.amount-btn.selected {
-    background: linear-gradient(135deg, #0066aa, #00aaff) !important;
-    border-color: #00ffff !important;
-}
-.pm-portfolio {
-    background: linear-gradient(135deg, #12192a, #0a1018);
-    border: 1px solid #00ffff; border-radius: 8px; padding: 8px;
-}
-.pm-position { background: rgba(18,24,34,0.9); border: 1px solid #333;
-               border-radius: 4px; padding: 6px; margin: 3px 0; }
-.pm-position-long { border-left: 3px solid #00ff88; }
-.pm-position-short { border-left: 3px solid #ff4444; }
-.sym-clickable {
-    cursor: pointer; color: #00ff88; font-weight: bold; font-size: 11px;
-    text-decoration: none; border-bottom: 1px dotted rgba(0,255,136,0.3);
-    transition: all 0.15s;
-}
-.sym-clickable:hover {
-    color: #00ffff; text-shadow: 0 0 8px #00ffff;
-    border-bottom-color: #00ffff;
-}
 """
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG],
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY],
                 suppress_callback_exceptions=True)
-app.title = "🎰 STASIS PM"
+app.title = "STASIS AM"
 server = app.server
 
-app.index_string = '''<!DOCTYPE html>
+app.index_string = f'''<!DOCTYPE html>
 <html><head>
-{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>''' + PM_CSS + '''</style>
+{{%metas%}}<title>{{%title%}}</title>{{%favicon%}}{{%css%}}
+<style>{AM_CSS}</style>
 </head><body>
-{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
+{{%app_entry%}}<footer>{{%config%}}{{%scripts%}}{{%renderer%}}</footer>
 </body></html>'''
 
 app.layout = html.Div([
-    dcc.Store(id='pm-bet-amount', data=100),
-    dcc.Store(id='pm-trigger', data=0),
-    dcc.Store(id='pm-filter-mode', data='signals'),
-    dcc.Store(id='pm-selected-symbol', data=''),       # NEW: store for selected symbol
+    dcc.Store(id='fmode', data='tradable'),
     dcc.Interval(id='tick', interval=1000, n_intervals=0),
 
-    # NEW: hidden div for symbol bridge (like AM)
-    html.Div(id='_pm_sym_bridge', style={'display': 'none'}),
-
-    dbc.Toast(id="pm-toast", header="", is_open=False, duration=3500, dismissable=True,
-              style={"position": "fixed", "top": 10, "left": "50%",
-                     "transform": "translateX(-50%)", "width": 300, "zIndex": 9999}),
-
+    # Header
     html.Div([
-        html.Div([
-            html.Span("🎰", style={'fontSize': '28px'}),
-            html.Span(" STASIS PM", className="title-font neon-green ms-2",
-                      style={'fontSize': '20px', 'fontWeight': '700', 'letterSpacing': '3px'}),
-            html.Span(" — PREDICTION MARKETS", className="title-font",
-                      style={'fontSize': '10px', 'color': '#666', 'letterSpacing': '1px'}),
-        ], className="mb-1"),
+        html.Span("📈", style={'fontSize': '22px'}),
+        html.Span(" STASIS AM", className="title-font ms-2",
+                  style={'fontSize': '16px', 'fontWeight': '700', 'color': '#1a5c2a',
+                         'letterSpacing': '2px'}),
+        html.Span(" — ALPHA MARKETS", className="title-font",
+                  style={'fontSize': '9px', 'color': '#888', 'letterSpacing': '1px'}),
+    ], style={'padding': '8px'}),
 
-        html.Div(id='pm-status', style={'fontSize': '9px', 'marginBottom': '4px'}),
-        html.Div(id='pm-summary', style={'fontSize': '9px', 'marginBottom': '4px'}),
+    html.Div(id='status', style={'fontSize': '10px', 'padding': '4px 8px',
+                                  'background': '#e8f5e9', 'fontWeight': 'bold'}),
+    # Filters
+    html.Div([
+        dbc.ButtonGroup([
+            dbc.Button("ALL", id="f-all", size="sm", outline=True,
+                       style={'fontSize': '9px'}),
+            dbc.Button("TRADABLE", id="f-trad", size="sm", outline=True,
+                       active=True, style={'fontSize': '9px', 'color': '#1a5c2a'}),
+            dbc.Button("DECORR", id="f-decorr", size="sm", outline=True,
+                       style={'fontSize': '9px', 'color': '#8b4513'},
+                       className="ms-1"),
+        ], size="sm", className="me-2"),
+        dcc.Dropdown(id='f-dir',
+                     options=[{'label': x, 'value': x}
+                              for x in ['ALL', 'LONG', 'SHORT']],
+                     value='ALL', clearable=False,
+                     style={'width': '80px', 'fontSize': '10px',
+                            'display': 'inline-block'}),
+        dcc.Dropdown(id='f-sort', options=[
+            {'label': 'TMS ↓', 'value': 'tms'},
+            {'label': 'FMS ↓', 'value': 'fms'},
+            {'label': 'CMS ↓', 'value': 'cms'},
+            {'label': 'DECORR ↓', 'value': 'decorr'},
+            {'label': 'Δ CORR ↑', 'value': 'corr_delta'},
+            {'label': 'STASIS ↓', 'value': 'stasis'},
+            {'label': '52W ↑', 'value': '52w'},
+        ],
+            value='tms', clearable=False,
+            style={'width': '100px', 'fontSize': '10px', 'display': 'inline-block',
+                   'marginLeft': '4px'}),
+    ], className="d-flex align-items-center p-1",
+       style={'background': '#f5f0e8'}),
 
-        # Filters
-        html.Div([
-            dbc.ButtonGroup([
-                dbc.Button("ALL", id="pm-f-all", size="sm", color="secondary", outline=True,
-                           className="title-font", style={'fontSize': '8px'}),
-                dbc.Button("SIGNALS", id="pm-f-signals", size="sm", color="success", outline=True,
-                           active=True, className="title-font", style={'fontSize': '8px'}),
-                dbc.Button("JACKPOT", id="pm-f-jackpot", size="sm", color="warning", outline=True,
-                           className="title-font", style={'fontSize': '8px'}),
-            ], size="sm", className="me-2"),
-            dcc.Dropdown(id='pm-f-dir', options=[
-                {'label': 'ALL', 'value': 'ALL'}, {'label': 'LONG', 'value': 'LONG'},
-                {'label': 'SHORT', 'value': 'SHORT'}],
-                value='ALL', clearable=False,
-                style={'width': '70px', 'fontSize': '9px', 'display': 'inline-block',
-                       'verticalAlign': 'middle'}),
-        ], className="d-flex align-items-center mb-1"),
+    # Table — updated columns to include correlation data
+    dash_table.DataTable(
+        id='tbl', columns=[{'name': c, 'id': c} for c in [
+            '✓', 'SYM', 'BAND', 'STS', 'DIR',
+            'SMS', 'FMS', 'CMS', 'TMS',
+            'CORR', 'ΔCOR', 'DCOR', 'DIV',
+            'REV5', 'FCF5', 'FCFY', '52W',
+            'PRICE', 'TP', 'SL', 'R:R', 'DUR']],
+        sort_action='native',
+        style_table={'overflowY': 'auto', 'height': '80vh'},
+        style_cell={
+            'backgroundColor': '#faf7f0', 'color': '#1a1a1a',
+            'padding': '3px 4px', 'fontSize': '10px',
+            'fontFamily': 'Consolas, monospace',
+            'whiteSpace': 'nowrap', 'textAlign': 'right',
+            'border': '1px solid #ddd'},
+        style_cell_conditional=[
+            {'if': {'column_id': 'SYM'}, 'textAlign': 'left',
+             'fontWeight': '700', 'color': '#1a5c2a'},
+            {'if': {'column_id': 'DIR'}, 'textAlign': 'center'},
+            {'if': {'column_id': 'DIV'}, 'textAlign': 'center',
+             'fontSize': '8px'},
+        ],
+        style_header={
+            'backgroundColor': '#1a5c2a', 'color': '#fff',
+            'fontWeight': '700', 'fontSize': '9px', 'textAlign': 'center'},
+        style_data_conditional=[
+            # Direction colors
+            {'if': {'filter_query': '{DIR} = "LONG"', 'column_id': 'DIR'},
+             'color': '#1a8c3a', 'fontWeight': 'bold'},
+            {'if': {'filter_query': '{DIR} = "SHORT"', 'column_id': 'DIR'},
+             'color': '#cc2200', 'fontWeight': 'bold'},
+            # Stasis highlighting
+            {'if': {'filter_query': '{STS} >= 10'},
+             'backgroundColor': '#e8f5e9'},
+            {'if': {'filter_query': '{STS} >= 7 && {STS} < 10'},
+             'backgroundColor': '#f1f8e9'},
+            # Price column
+            {'if': {'column_id': 'PRICE'},
+             'color': '#0055aa', 'fontWeight': '600'},
+            {'if': {'column_id': 'TP'}, 'color': '#1a8c3a'},
+            {'if': {'column_id': 'SL'}, 'color': '#cc2200'},
+            # TMS highlighting
+            {'if': {'filter_query': '{TMS} >= 35', 'column_id': 'TMS'},
+             'backgroundColor': '#1a8c3a', 'color': '#fff'},
+            {'if': {'filter_query': '{TMS} >= 25 && {TMS} < 35',
+                    'column_id': 'TMS'},
+             'backgroundColor': '#4caf50', 'color': '#fff'},
+            {'if': {'filter_query': '{TMS} >= 15 && {TMS} < 25',
+                    'column_id': 'TMS'},
+             'backgroundColor': '#81c784', 'color': '#fff'},
+            # CMS (correlation merit) highlighting
+            {'if': {'filter_query': '{CMS} >= 8', 'column_id': 'CMS'},
+             'backgroundColor': '#e65100', 'color': '#fff'},
+            {'if': {'filter_query': '{CMS} >= 5 && {CMS} < 8',
+                    'column_id': 'CMS'},
+             'backgroundColor': '#f57c00', 'color': '#fff'},
+            {'if': {'filter_query': '{CMS} >= 3 && {CMS} < 5',
+                    'column_id': 'CMS'},
+             'backgroundColor': '#ffb74d', 'color': '#000'},
+            # Decorrelation score highlighting
+            {'if': {'filter_query': '{_dcor_raw} >= 0.5',
+                    'column_id': 'DCOR'},
+             'backgroundColor': '#d32f2f', 'color': '#fff'},
+            {'if': {'filter_query': '{_dcor_raw} >= 0.3 && {_dcor_raw} < 0.5',
+                    'column_id': 'DCOR'},
+             'backgroundColor': '#ff7043', 'color': '#fff'},
+            # Divergence highlighting
+            {'if': {'filter_query': '{DIV} = "P>R"', 'column_id': 'DIV'},
+             'backgroundColor': '#fff3e0', 'color': '#e65100'},
+            {'if': {'filter_query': '{DIV} = "P<R"', 'column_id': 'DIV'},
+             'backgroundColor': '#e8f5e9', 'color': '#1b5e20'},
+            # Alternating rows
+            {'if': {'row_index': 'odd'}, 'backgroundColor': '#f0ebe0'},
+        ],
+        tooltip_header={
+            'CORR': 'Price:Revenue 5-quarter correlation',
+            'ΔCOR': 'Correlation change (negative = decorrelating)',
+            'DCOR': 'Decorrelation score (0-1, higher = more decorrelated)',
+            'CMS': 'Correlation Merit Score',
+            'DIV': 'Price vs Revenue divergence direction',
+        },
+    ),
 
-        # Bet amount
-        html.Div([
-            html.Span("BET: ", className="title-font",
-                       style={'fontSize': '9px', 'color': '#ffd700'}),
-            *[dbc.Button(f"${a}", id={'type': 'pm-amt', 'amount': a},
-                         className=f"amount-btn {'selected' if a == 100 else ''}",
-                         size="sm") for a in BET_SIZES],
-        ], className="d-flex align-items-center flex-wrap mb-1"),
+    # Footer
+    html.Div("© 2026 Truth Communications LLC • STASIS AM",
+             className="text-center",
+             style={'fontSize': '8px', 'color': '#888', 'padding': '4px'}),
 
-        # NEW: Click hint
-        html.Div("💡 Click any symbol name to look up on SA/RH/TT",
-                 style={'fontSize': '9px', 'color': '#aa8800', 'padding': '2px 0 4px 0'}),
-
-        # Markets
-        html.Div(id='pm-market-list', style={'height': '50vh', 'overflowY': 'auto'}),
-
-        html.Hr(style={'borderColor': '#222', 'margin': '6px 0'}),
-
-        # Portfolio
-        html.Div([
-            html.Div([
-                html.Span("💰 ACCOUNT", className="title-font neon-cyan",
-                           style={'fontSize': '10px'}),
-                dbc.Button("Reset", id="pm-reset", size="sm", color="secondary",
-                           style={'fontSize': '7px', 'padding': '1px 5px', 'marginLeft': '8px'}),
-            ], className="d-flex align-items-center mb-1"),
-            html.Div(id='pm-portfolio'),
-        ], className="pm-portfolio mb-2"),
-
-        html.Div([
-            html.Span("📊 POSITIONS", className="title-font",
-                       style={'fontSize': '9px', 'color': '#00ffff'}),
-            html.Div(id='pm-positions', style={'maxHeight': '15vh', 'overflowY': 'auto'}),
-        ], className="mb-2"),
-
-        html.Div([
-            html.Span("📜 HISTORY", className="title-font",
-                       style={'fontSize': '9px', 'color': '#ffd700'}),
-            html.Div(id='pm-history', style={'maxHeight': '12vh', 'overflowY': 'auto'}),
-        ]),
-
-        html.Div("© 2026 Truth Communications LLC • STASIS PM",
-                 className="text-center",
-                 style={'fontSize': '8px', 'color': '#444', 'padding': '8px'}),
-    ], style={'padding': '8px', 'minHeight': '100vh'}),
-])
+], style={'background': '#f5f0e8', 'minHeight': '100vh'})
 
 
 # ============================================================================
-# NEW: Symbol bridge callback — writes selected symbol to window.name
-# so the desktop app can read it via polling
-# ============================================================================
-
-app.clientside_callback(
-    """function(sym) {
-        if (sym && sym.length > 0) {
-            window.name = 'STASIS_SYM:' + sym;
-        }
-        return '';
-    }""",
-    Output('_pm_sym_bridge', 'children'),
-    Input('pm-selected-symbol', 'data'),
-    prevent_initial_call=True
-)
-
-
-# NEW: Callback to handle symbol clicks from the market list
-@app.callback(
-    Output('pm-selected-symbol', 'data'),
-    Input({'type': 'pm-sym-click', 'symbol': ALL}, 'n_clicks'),
-    prevent_initial_call=True)
-def pm_symbol_clicked(clicks):
-    ctx = callback_context
-    if not ctx.triggered or not any(clicks):
-        return no_update
-    try:
-        prop = ctx.triggered[0]['prop_id']
-        d = json.loads(prop.rsplit('.', 1)[0])
-        sym = d.get('symbol', '')
-        if sym:
-            return sym
-    except:
-        pass
-    return no_update
-
-
-# ============================================================================
-# CALLBACKS
+# CALLBACKS (UPDATED)
 # ============================================================================
 
 
-@app.callback(Output('pm-status', 'children'), Input('tick', 'n_intervals'))
+@app.callback(Output('status', 'children'), Input('tick', 'n_intervals'))
 def update_status(n):
     if not manager.backfill_complete:
-        return html.Span(f"⏳ INITIALIZING... {manager.backfill_progress}%",
-                         style={'color': '#ffaa00'})
+        return html.Span(
+            f"⏳ Initializing... {manager.backfill_progress}%",
+            style={'color': '#aa6600'})
     st = price_feed.get_status()
+    am_data = manager.get_am_data()
+    tradable = sum(1 for d in am_data if d.get('is_tradable'))
+    corr_count = sum(1 for v in config.correlation_data.values()
+                     if v.get('corr_5q') is not None)
+    decorr_count = sum(
+        1 for v in config.correlation_data.values()
+        if v.get('decorrelation_score') is not None
+        and v['decorrelation_score'] > 0.3)
     if st['connected'] == 0:
-        return html.Span("🔴 CONNECTING...", style={'color': '#ffaa00'})
+        return html.Span(
+            f"🔴 Connecting... | {tradable} tradable",
+            style={'color': '#aa6600'})
     return html.Span(
-        f"🟢 LIVE {st['connected']}/{st['total']} | 📨 {st['messages']:,}",
-        style={'color': '#00ff88'})
-
-
-@app.callback(Output('pm-summary', 'children'), Input('tick', 'n_intervals'))
-def pm_summary(n):
-    if not manager.backfill_complete:
-        return ""
-    mkt = manager.get_pm_market()
-    sigs = sum(1 for m in mkt.values() if m.get('direction'))
-    hi = sum(1 for m in mkt.values() if m.get('edge', 0) >= 10)
-    jp = sum(1 for m in mkt.values() if m.get('tier'))
-    return html.Div([
-        html.Span(f"📈 {sigs} signals", style={'color': '#00ff88'}),
-        html.Span(f" | 🔥 {hi} high-edge", style={'color': '#ff8800'}),
-        html.Span(f" | 🎰 {jp} jackpots", style={'color': '#ffd700'}),
-    ])
+        f"🟢 LIVE {st['connected']}/{st['total']} | "
+        f"📨 {st['messages']:,} msgs | "
+        f"📊 {len(config.fundamental_slopes)} fundamentals | "
+        f"🔗 {corr_count} correlations ({decorr_count} decorrelating) | "
+        f"🎯 {tradable} tradable",
+        style={'color': '#1a5c2a'})
 
 
 @app.callback(
-    [Output('pm-f-all', 'active'), Output('pm-f-signals', 'active'),
-     Output('pm-f-jackpot', 'active'), Output('pm-filter-mode', 'data')],
-    [Input('pm-f-all', 'n_clicks'), Input('pm-f-signals', 'n_clicks'),
-     Input('pm-f-jackpot', 'n_clicks')],
+    [Output('f-all', 'active'), Output('f-trad', 'active'),
+     Output('f-decorr', 'active'), Output('fmode', 'data')],
+    [Input('f-all', 'n_clicks'), Input('f-trad', 'n_clicks'),
+     Input('f-decorr', 'n_clicks')],
     prevent_initial_call=True)
-def pm_toggle_filter(n1, n2, n3):
+def toggle_filter(n1, n2, n3):
     ctx = callback_context
-    if not ctx.triggered:
-        return False, True, False, 'signals'
-    b = ctx.triggered[0]['prop_id'].split('.')[0]
-    if b == 'pm-f-all':
+    tid = ctx.triggered[0]['prop_id']
+    if 'f-all' in tid:
         return True, False, False, 'all'
-    if b == 'pm-f-jackpot':
-        return False, False, True, 'jackpot'
-    return False, True, False, 'signals'
+    elif 'f-decorr' in tid:
+        return False, False, True, 'decorr'
+    return False, True, False, 'tradable'
 
 
 @app.callback(
-    Output('pm-bet-amount', 'data'),
-    Input({'type': 'pm-amt', 'amount': ALL}, 'n_clicks'),
-    State('pm-bet-amount', 'data'),
-    prevent_initial_call=True)
-def pm_set_amount(clicks, cur):
-    ctx = callback_context
-    if not ctx.triggered or not any(clicks):
-        return cur
-    try:
-        return json.loads(ctx.triggered[0]['prop_id'].rsplit('.', 1)[0])['amount']
-    except:
-        return cur
-
-
-@app.callback(
-    [Output({'type': 'pm-amt', 'amount': a}, 'className') for a in BET_SIZES],
-    Input('pm-bet-amount', 'data'))
-def pm_highlight(sel):
-    return [f"amount-btn {'selected' if a == sel else ''}" for a in BET_SIZES]
-
-
-@app.callback(
-    Output('pm-market-list', 'children'),
-    [Input('tick', 'n_intervals'), Input('pm-filter-mode', 'data'),
-     Input('pm-f-dir', 'value'), Input('pm-bet-amount', 'data'),
-     Input('pm-trigger', 'data')])
-def pm_market_list(n, fmode, fdir, bet, trigger):
+    Output('tbl', 'data'),
+    [Input('tick', 'n_intervals'), Input('fmode', 'data'),
+     Input('f-dir', 'value'), Input('f-sort', 'value')])
+def update_table(n, fm, fd, fs):
     if not manager.backfill_complete:
-        return html.Div("Loading…", className="text-muted text-center p-3",
-                         style={'color': '#666'})
-    mkt = manager.get_pm_market()
-    mer = manager.get_pm_merit()
-    items = []
-    for sym in config.symbols:
-        m = mkt.get(sym, {})
-        mr = mer.get(sym, {})
-        d = m.get('direction')
-        edge = m.get('edge', 0)
-        tier = m.get('tier')
-        if fmode == 'signals' and not d:
-            continue
-        if fmode == 'jackpot' and not tier:
-            continue
-        if fdir == 'LONG' and d != 'LONG':
-            continue
-        if fdir == 'SHORT' and d != 'SHORT':
-            continue
-        items.append({'symbol': sym, 'm': m, 'mr': mr, 'edge': edge})
-    items.sort(key=lambda x: x['edge'], reverse=True)
-    if not items:
-        return html.Div("No markets match", className="text-muted text-center p-3",
-                         style={'color': '#666'})
+        return []
+    data = manager.get_am_data()
+    if not data:
+        return []
     rows = []
-    for i, it in enumerate(items[:60]):
-        sym = it['symbol']
-        m = it['m']
-        mr = it['mr']
-        d = m.get('direction', '—')
-        bp = m.get('buy_price', .5)
-        sp = m.get('sell_price', .5)
-        edge = m.get('edge', 0)
-        payout = m.get('payout', 1)
-        emoji = m.get('emoji', '⬜')
-        lvl = mr.get('stasis_levels', 0)
-        align = mr.get('direction_alignment', 0)
-        dc = '#00ff88' if d == 'LONG' else '#ff4444' if d == 'SHORT' else '#555'
-        rows.append(html.Div([
-            dbc.Row([
-                dbc.Col([
-                    html.Span(f"#{i + 1}",
-                              style={'color': '#ffd700' if i < 3 else '#555', 'fontSize': '9px'}),
-                    html.Span(f" {emoji} ", style={'fontSize': '12px'}),
-                    # CHANGED: symbol is now a clickable button with pattern-matching ID
-                    html.Button(
-                        sym,
-                        id={'type': 'pm-sym-click', 'symbol': sym},
-                        className="sym-clickable",
-                        style={'background': 'none', 'border': 'none', 'padding': '0',
-                               'cursor': 'pointer', 'color': '#00ff88', 'fontWeight': 'bold',
-                               'fontSize': '11px', 'borderBottom': '1px dotted rgba(0,255,136,0.3)'},
-                    ),
-                ], width=3),
-                dbc.Col([
-                    html.Span(d, style={'color': dc, 'fontWeight': 'bold', 'fontSize': '9px'}),
-                    html.Span(f" {lvl}L {align:.0f}%",
-                              style={'color': '#666', 'fontSize': '8px'}),
-                ], width=2),
-                dbc.Col([
-                    html.Span(f"${bp:.2f}", style={'color': '#00ff88', 'fontWeight': 'bold',
-                                                     'fontSize': '10px'}),
-                    html.Span("/", style={'color': '#333'}),
-                    html.Span(f"${sp:.2f}", style={'color': '#ff4444', 'fontWeight': 'bold',
-                                                     'fontSize': '10px'}),
-                    html.Br(),
-                    html.Span(f"+{edge:.1f}% {payout:.1f}x",
-                              style={'color': '#ffd700', 'fontSize': '8px'}),
-                ], width=3),
-                dbc.Col([
-                    html.Button(f"YES ${bp:.2f}",
-                                id={'type': 'pm-buy-yes', 'symbol': sym},
-                                className="btn-yes me-1", disabled=not d),
-                    html.Button(f"NO ${sp:.2f}",
-                                id={'type': 'pm-buy-no', 'symbol': sym},
-                                className="btn-no", disabled=not d),
-                ], width=4, className="text-end"),
-            ], className="align-items-center"),
-        ], className="pm-market-row"))
-    return html.Div(rows)
+    for d in data:
+        if fm == 'tradable' and not d.get('is_tradable'):
+            continue
+        if fm == 'decorr':
+            # Only show stocks with significant decorrelation
+            cd = d.get('corr_details', {})
+            dcor = cd.get('decor_score')
+            if dcor is None or dcor < 0.15:
+                continue
+        if fd != 'ALL' and d.get('direction') != fd:
+            continue
 
+        sd = d.get('slope_details', {})
+        cd = d.get('corr_details', {})
+        w52 = d.get('week52_percentile')
 
-@app.callback(Output('pm-portfolio', 'children'),
-              [Input('tick', 'n_intervals'), Input('pm-trigger', 'data')])
-def pm_portfolio_display(n, t):
-    mkt = manager.get_pm_market()
-    st = portfolio.get_stats(mkt)
-    pnl = st['total_pnl']
-    pc = '#00ff88' if pnl >= 0 else '#ff4444'
-    return html.Div([
-        html.Div(f"${st['portfolio_value']:,.2f}", className="neon-cyan",
-                 style={'fontSize': '14px', 'fontWeight': 'bold'}),
-        html.Div([
-            html.Span(f"Cash ${st['balance']:,.2f}",
-                       style={'fontSize': '9px', 'color': '#888'}),
-            html.Span(f" | P&L {'+' if pnl >= 0 else ''}${pnl:,.2f}",
-                       style={'fontSize': '9px', 'color': pc}),
-            html.Span(f" | Win {st['win_rate']:.0f}%",
-                       style={'fontSize': '9px',
-                              'color': '#00ff88' if st['win_rate'] >= 50 else '#ff4444'}),
-        ]),
-    ])
+        # Format correlation columns
+        corr_5q = cd.get('corr_5q')
+        corr_delta = cd.get('corr_delta')
+        decor_score = cd.get('decor_score')
+        divergence = cd.get('divergence')
 
+        # Divergence display
+        div_display = '—'
+        if divergence == 'PRICE_AHEAD':
+            div_display = 'P>R'
+        elif divergence == 'PRICE_BEHIND':
+            div_display = 'P<R'
+        elif divergence == 'ALIGNED':
+            div_display = '≈'
 
-@app.callback(Output('pm-positions', 'children'),
-              [Input('tick', 'n_intervals'), Input('pm-trigger', 'data')])
-def pm_positions_display(n, t):
-    pos = portfolio.get_positions_list()
-    mkt = manager.get_pm_market()
-    if not pos:
-        return html.Div("No positions", style={'fontSize': '9px', 'color': '#555'})
-    items = []
-    for p in pos:
-        m = mkt.get(p['symbol'], {})
-        if p['side'] == 'YES':
-            cv = p['shares'] * m.get('sell_price', p['entry_price'])
-        else:
-            cv = p['shares'] * (1 - m.get('buy_price', 1 - p['entry_price']))
-        pnl = cv - p['cost_basis']
-        pc = '#00ff88' if pnl >= 0 else '#ff4444'
-        sc = 'pm-position-long' if p['side'] == 'YES' else 'pm-position-short'
-        items.append(html.Div([
-            html.Div([
-                html.Span(p['symbol'], style={'color': '#00ff88', 'fontWeight': 'bold',
-                                               'fontSize': '10px'}),
-                html.Span(f" {p['side']}",
-                           style={'color': '#00ff88' if p['side'] == 'YES' else '#ff4444',
-                                  'fontSize': '9px'}),
-                html.Button("✕", id={'type': 'pm-close', 'id': p['id']},
-                             className="btn-close-pos ms-2"),
-            ], className="d-flex align-items-center justify-content-between"),
-            html.Span(f"P&L {'+' if pnl >= 0 else ''}${pnl:.2f}",
-                       style={'color': pc, 'fontSize': '9px'}),
-        ], className=f"pm-position {sc}"))
-    return html.Div(items)
-
-
-@app.callback(Output('pm-history', 'children'),
-              [Input('tick', 'n_intervals'), Input('pm-trigger', 'data')])
-def pm_history_display(n, t):
-    trades = portfolio.get_recent_trades(6)
-    if not trades:
-        return html.Div("No trades", style={'fontSize': '9px', 'color': '#555'})
-    items = []
-    for tr in trades:
-        if tr['action'] == 'CLOSE':
-            pnl = tr.get('pnl', 0)
-            pc = '#00ff88' if pnl >= 0 else '#ff4444'
-            items.append(html.Div([
-                html.Span(f"CLOSE {tr['symbol']} {tr['side']}",
-                           style={'color': '#888', 'fontSize': '9px'}),
-                html.Span(f" {'+' if pnl >= 0 else ''}${pnl:.2f}",
-                           style={'color': pc, 'fontSize': '9px'}),
-            ], style={'padding': '2px 0'}))
-        else:
-            sc = '#00ff88' if tr['side'] == 'YES' else '#ff4444'
-            items.append(html.Div([
-                html.Span(f"BUY {tr['side']} {tr['symbol']} ${tr['amount']:.0f}",
-                           style={'color': sc, 'fontSize': '9px'}),
-            ], style={'padding': '2px 0'}))
-    return html.Div(items)
-
-
-@app.callback(
-    [Output('pm-toast', 'is_open'), Output('pm-toast', 'header'),
-     Output('pm-toast', 'children'), Output('pm-toast', 'style'),
-     Output('pm-trigger', 'data')],
-    [Input({'type': 'pm-buy-yes', 'symbol': ALL}, 'n_clicks'),
-     Input({'type': 'pm-buy-no', 'symbol': ALL}, 'n_clicks'),
-     Input({'type': 'pm-close', 'id': ALL}, 'n_clicks'),
-     Input('pm-reset', 'n_clicks')],
-    [State('pm-bet-amount', 'data'), State('pm-trigger', 'data')],
-    prevent_initial_call=True)
-def pm_execute(yes_c, no_c, close_c, reset_c, bet, trigger):
-    ctx = callback_context
-    if not ctx.triggered:
-        return no_update, no_update, no_update, no_update, no_update
-    prop = ctx.triggered[0]['prop_id']
-    val = ctx.triggered[0]['value']
-    base = {"position": "fixed", "top": 10, "left": "50%",
-            "transform": "translateX(-50%)", "width": 300, "zIndex": 9999,
-            "backgroundColor": "#1a1a2e"}
-    if 'pm-reset' in prop and val:
-        portfolio.reset()
-        return True, "🔄 RESET", \
-               html.Span(f"${STARTING_BALANCE:,.2f}", style={'color': '#00ffff'}), \
-               {**base, 'border': '2px solid #00ffff'}, trigger + 1
-    if 'pm-close' in prop and val:
-        try:
-            d = json.loads(prop.rsplit('.', 1)[0])
-            pid = d.get('id')
-            pos = next((p for p in portfolio.get_positions_list() if p['id'] == pid), None)
-            if pos:
-                mkt = manager.get_pm_market()
-                m = mkt.get(pos['symbol'], {})
-                res = portfolio.close_position(pid, m.get('buy_price', .5),
-                                                m.get('sell_price', .5))
-                if res['success']:
-                    pnl = res['pnl']
-                    pc = '#00ff88' if pnl >= 0 else '#ff4444'
-                    return True, "✅ CLOSED", \
-                           html.Span(f"{pos['symbol']} {'+' if pnl >= 0 else ''}${pnl:.2f}",
-                                     style={'color': pc, 'fontWeight': 'bold'}), \
-                           {**base, 'border': f'2px solid {pc}'}, trigger + 1
-        except:
-            pass
-        return no_update, no_update, no_update, no_update, no_update
-    if ('pm-buy-yes' in prop or 'pm-buy-no' in prop) and val:
-        try:
-            d = json.loads(prop.rsplit('.', 1)[0])
-            sym = d.get('symbol')
-            side = 'YES' if 'buy-yes' in prop else 'NO'
-            mkt = manager.get_pm_market()
-            m = mkt.get(sym, {})
-            if not m.get('direction'):
-                return True, "❌", html.Span("No signal", style={'color': '#ff4444'}), \
-                       {**base, 'border': '2px solid #ff4444'}, trigger
-            res = portfolio.place_bet(sym, side, bet, m.get('buy_price', .5),
-                                       m.get('sell_price', .5), m.get('direction'),
-                                       m.get('stock_price', 0))
-            if res['success']:
-                sc = '#00ff88' if side == 'YES' else '#ff4444'
-                return True, "✅ BET", \
-                       html.Div([
-                           html.Span(f"{side} {sym} ${bet}",
-                                     style={'color': sc, 'fontWeight': 'bold'}),
-                           html.Br(),
-                           html.Span(f"Bal: ${res['new_balance']:,.2f}",
-                                     style={'color': '#888', 'fontSize': '10px'}),
-                       ]), {**base, 'border': f'2px solid {sc}'}, trigger + 1
-            else:
-                return True, "❌", \
-                       html.Span(res.get('error', ''), style={'color': '#ff4444'}), \
-                       {**base, 'border': '2px solid #ff4444'}, trigger
-        except Exception as e:
-            return True, "❌", html.Span(str(e), style={'color': '#ff4444'}), \
-                   {**base, 'border': '2px solid #ff4444'}, trigger
-    return no_update, no_update, no_update, no_update, no_update
+        rows.append({
+            '✓': '✅' if d.get('is_tradable') else '',
+            'SYM': d['symbol'],
+            'BAND': f"{d['threshold_pct']:.2f}%",
+            'STS': d['stasis'],
+            'DIR': d.get('direction') or '—',
+            'SMS': d.get('sms', 0),
+            'FMS': d.get('fms', 0),
+            'CMS': d.get('cms', 0),
+            'TMS': d.get('tms', 0),
+            'CORR': fmt_corr(corr_5q),
+            'ΔCOR': fmt_corr_delta(corr_delta),
+            'DCOR': (f"{decor_score:.2f}"
+                     if decor_score is not None else '—'),
+            'DIV': div_display,
+            'REV5': fmt_slope(sd.get('Rev_5')),
+            'FCF5': fmt_slope(sd.get('FCF_5')),
+            'FCFY': (f"{sd['FCFY'] * 100:.1f}%"
+                     if sd.get('FCFY') else '—'),
+            '52W': f"{w52:.0f}%" if w52 is not None else '—',
+            'PRICE': (f"${d['current_price']:.2f}"
+                      if d.get('current_price') else '—'),
+            'TP': (f"${d['take_profit']:.2f}"
+                   if d.get('take_profit') else '—'),
+            'SL': (f"${d['stop_loss']:.2f}"
+                   if d.get('stop_loss') else '—'),
+            'R:R': fmt_rr(d.get('risk_reward')),
+            'DUR': d.get('stasis_duration_str', '—'),
+            # Hidden sort columns
+            '_tms': d.get('tms', 0),
+            '_fms': d.get('fms', 0),
+            '_cms': d.get('cms', 0),
+            '_stasis': d['stasis'],
+            '_52w': w52 if w52 is not None else 999,
+            '_dcor_raw': decor_score if decor_score is not None else -1,
+            '_corr_delta': (corr_delta if corr_delta is not None
+                            else 999),
+        })
+    if not rows:
+        return []
+    df = pd.DataFrame(rows)
+    sort_map = {
+        'tms': ('_tms', False),
+        'fms': ('_fms', False),
+        'cms': ('_cms', False),
+        'decorr': ('_dcor_raw', False),
+        'corr_delta': ('_corr_delta', True),  # ascending: most negative first
+        'stasis': ('_stasis', False),
+        '52w': ('_52w', True),
+    }
+    col, asc = sort_map.get(fs, ('_tms', False))
+    df = df.sort_values(col, ascending=asc).head(200)
+    df = df.drop(
+        columns=['_tms', '_fms', '_cms', '_stasis', '_52w',
+                 '_dcor_raw', '_corr_delta'],
+        errors='ignore')
+    return df.to_dict('records')
 
 
 # ============================================================================
-# API
+# API ENDPOINTS
 # ============================================================================
 
 
 @server.route('/api/health')
 def health():
     return json.dumps({
-        'status': 'ok', 'app': 'stasis_pm',
+        'status': 'ok', 'app': 'stasis_am',
         'initialized': manager.initialized,
         'backfill_complete': manager.backfill_complete,
         'backfill_progress': manager.backfill_progress,
+        'correlations_calculated': len(config.correlation_data),
     })
 
 
+@server.route('/api/correlations')
+def api_correlations():
+    """API endpoint to get all correlation data."""
+    result = {}
+    for sym, data in config.correlation_data.items():
+        if data.get('corr_5q') is not None:
+            result[sym] = {
+                'corr_5q': data['corr_5q'],
+                'corr_4q_prev': data.get('corr_4q_prev'),
+                'corr_delta': data.get('corr_delta'),
+                'decorrelation_score': data.get('decorrelation_score'),
+                'divergence': data.get('price_vs_rev_divergence'),
+                'quarters_available': data.get('quarters_available'),
+                'latest_rev_change_pct': data.get('latest_rev_change_pct'),
+                'latest_price_change_pct': data.get('latest_price_change_pct'),
+            }
+    return json.dumps(result, indent=2)
+
+
+@server.route('/api/decorrelating')
+def api_decorrelating():
+    """API endpoint: stocks sorted by decorrelation score."""
+    items = []
+    for sym, data in config.correlation_data.items():
+        if data.get('decorrelation_score') is not None:
+            items.append({
+                'symbol': sym,
+                'decorrelation_score': data['decorrelation_score'],
+                'corr_5q': data['corr_5q'],
+                'corr_delta': data.get('corr_delta'),
+                'divergence': data.get('price_vs_rev_divergence'),
+            })
+    items.sort(key=lambda x: x['decorrelation_score'], reverse=True)
+    return json.dumps(items, indent=2)
+
+
 # ============================================================================
-# INITIALIZATION
+# INITIALIZATION (UPDATED)
 # ============================================================================
 
 _init_done = False
@@ -1366,16 +1543,43 @@ def initialize():
         if _init_done:
             return
         print("=" * 70)
-        print("  STASIS PM SERVER — PREDICTION MARKETS")
+        print("  STASIS AM SERVER")
         print("  © 2026 Truth Communications LLC")
+        print("  Now with Price:Revenue Correlation Analysis")
         print("=" * 70)
         print(f"\n🎯 Symbols: {len(config.symbols)}")
+
+        # Step 1: 52-week data
         config.week52_data = fetch_52_week_data()
+
+        # Step 2: Volume data
         config.volumes = fetch_volume_data()
+
+        # Step 3: Fundamental data (revenue, FCF, etc.)
+        fetch_all_fundamental_data()
+
+        # Step 4: Price:Revenue Correlations (NEW)
+        calculate_all_correlations()
+
+        # Step 5: Backfill bitstreams
         manager.backfill()
+
+        # Step 6: Start live feeds
         price_feed.start()
         manager.start()
-        print(f"\n✅ STASIS PM READY")
+
+        corr_count = sum(
+            1 for v in config.correlation_data.values()
+            if v.get('corr_5q') is not None)
+        decorr_count = sum(
+            1 for v in config.correlation_data.values()
+            if v.get('decorrelation_score') is not None
+            and v['decorrelation_score'] > 0.3)
+
+        print(f"\n✅ READY")
+        print(f"   📊 {len(config.fundamental_slopes)} fundamentals")
+        print(f"   🔗 {corr_count} correlations calculated")
+        print(f"   🔔 {decorr_count} significantly decorrelating")
         print("=" * 70)
         _init_done = True
 
@@ -1389,6 +1593,6 @@ _init_thread.start()
 
 if __name__ == '__main__':
     _init_thread.join()
-    port = int(os.environ.get('PORT', 8051))
+    port = int(os.environ.get('PORT', 8050))
     print(f"\n🟢 http://0.0.0.0:{port}\n")
     app.run(debug=False, host='0.0.0.0', port=port)
