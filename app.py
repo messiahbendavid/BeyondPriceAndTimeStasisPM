@@ -168,190 +168,240 @@ def fmt_corr_delta(v):
 # ============================================================================
 
 
-def fetch_quarterly_prices_for_correlation(symbol: str, num_quarters: int = 8) -> Dict:
+# ============================================================================
+# PRICE:REVENUE CORRELATION ENGINE
+# ============================================================================
+
+
+def fetch_prices_for_correlation(symbol: str, num_quarters: int = 8) -> List[Dict]:
     """
-    Fetch monthly closing prices to align with fiscal quarter-end dates.
-    Returns dict with (year, month) -> close_price mapping.
+    Fetch DAILY closing prices going back far enough to cover the quarterly
+    filing dates. Returns list of {'date': 'YYYY-MM-DD', 'close': float}.
+    
+    Using daily bars instead of monthly — monthly bars have alignment issues
+    where filing dates fall between bar timestamps.
     """
     try:
         end = datetime.now()
-        start = end - timedelta(days=num_quarters * 100)
+        # Go back enough: ~90 days per quarter plus buffer
+        start = end - timedelta(days=num_quarters * 95 + 30)
 
-        url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/month/"
+        url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/day/"
                f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-               f"?adjusted=true&sort=asc&limit=200&apiKey={config.polygon_api_key}")
+               f"?adjusted=true&sort=asc&limit=5000&apiKey={config.polygon_api_key}")
 
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=20)
         if resp.status_code != 200:
-            return {}
+            print(f"      ⚠️ {symbol} daily bars HTTP {resp.status_code}")
+            return []
 
         results = resp.json().get('results', [])
         if not results:
-            return {}
+            print(f"      ⚠️ {symbol} no daily bar results")
+            return []
 
-        monthly_prices = {}
+        bars = []
         for bar in results:
             dt = datetime.fromtimestamp(bar['t'] / 1000)
-            monthly_prices[(dt.year, dt.month)] = bar['c']
-
-        return monthly_prices
+            bars.append({
+                'date': dt.strftime('%Y-%m-%d'),
+                'date_obj': dt,
+                'close': bar['c']
+            })
+        return bars
 
     except Exception as e:
-        print(f"   ⚠️ Price fetch for correlation failed {symbol}: {e}")
-        return {}
+        print(f"      ⚠️ {symbol} daily price fetch failed: {e}")
+        return []
 
 
-def get_price_at_quarter_end(monthly_prices: Dict, filing_date_str: str) -> Optional[float]:
+def find_price_on_date(daily_bars: List[Dict], target_date_str: str,
+                       max_lookback_days: int = 10) -> Optional[float]:
     """
-    Given a filing date string and monthly price data,
-    find the price closest to (but not after) the filing date.
+    Find the closing price on or just before a target date.
+    Uses binary-search style lookup on sorted daily bars.
+    
+    Much more reliable than monthly bar alignment.
     """
-    if not filing_date_str or not monthly_prices:
+    if not daily_bars or not target_date_str:
         return None
 
     try:
-        fd = datetime.strptime(filing_date_str[:10], '%Y-%m-%d')
-
-        # Try exact month first
-        key = (fd.year, fd.month)
-        if key in monthly_prices:
-            return monthly_prices[key]
-
-        # Try previous month
-        prev = fd - timedelta(days=30)
-        key = (prev.year, prev.month)
-        if key in monthly_prices:
-            return monthly_prices[key]
-
-        # Try month before that
-        prev2 = fd - timedelta(days=60)
-        key = (prev2.year, prev2.month)
-        if key in monthly_prices:
-            return monthly_prices[key]
-
+        target = datetime.strptime(target_date_str[:10], '%Y-%m-%d')
+    except (ValueError, TypeError):
         return None
-    except:
-        return None
+
+    best_price = None
+    best_gap = max_lookback_days + 1
+
+    for bar in daily_bars:
+        gap = (target - bar['date_obj']).days
+        # We want bars ON or BEFORE the target date
+        if 0 <= gap < best_gap:
+            best_gap = gap
+            best_price = bar['close']
+        # Also accept bars 1 day AFTER (for weekends/holidays)
+        elif -1 <= gap < 0 and best_price is None:
+            best_price = bar['close']
+
+    return best_price
 
 
 def _pearson_corr(prices: np.ndarray, revenues: np.ndarray) -> Optional[float]:
     """Safe Pearson correlation between two arrays of equal length."""
     if len(prices) < 3 or len(revenues) < 3:
         return None
+    if len(prices) != len(revenues):
+        return None
     if np.std(prices) < 1e-10 or np.std(revenues) < 1e-10:
         return None
-    corr = np.corrcoef(prices, revenues)[0, 1]
-    if np.isnan(corr):
+    try:
+        corr = np.corrcoef(prices, revenues)[0, 1]
+        if np.isnan(corr) or np.isinf(corr):
+            return None
+        return round(float(corr), 4)
+    except Exception:
         return None
-    return round(float(corr), 4)
 
 
-def calculate_price_revenue_correlation(symbol: str, current_live_price: Optional[float] = None) -> Dict:
+def calculate_price_revenue_correlation(
+        symbol: str, current_live_price: Optional[float] = None) -> Dict:
     """
     Calculate the 5-quarter price:revenue correlation in two states:
 
-    1. corr_at_earnings — the correlation using the PRICE ON THE LAST EARNINGS DATE
-       paired with the 5 trailing quarters of revenue. This is the "frozen" snapshot
-       of how aligned price and revenue were when the market last received new info.
+    1. corr_at_earnings — correlation using the PRICE ON THE LAST EARNINGS DATE
+       paired with 5 trailing quarters of revenue.
 
-    2. corr_now — the SAME 5 trailing quarters of revenue, but replacing the most
-       recent quarter's paired price with TODAY'S LIVE PRICE. This shows how the
-       correlation has shifted purely due to price movement since earnings.
+    2. corr_now — same 5 trailing quarters of revenue, but replacing the most
+       recent quarter's paired price with TODAY'S LIVE PRICE.
 
     3. corr_delta = corr_now - corr_at_earnings
-       Negative delta → price is decorrelating from revenue (diverging).
-       Positive delta → price is re-correlating toward revenue.
-
-    Returns dict with all correlation metrics.
+       Negative → price is decorrelating from revenue since last earnings.
+       Positive → price is re-correlating toward revenue.
     """
     result = {
-        'corr_at_earnings': None,      # correlation frozen at last earnings date price
-        'corr_now': None,               # correlation using current live price
-        'corr_delta': None,             # corr_now - corr_at_earnings
-        'decorrelation_score': None,    # 0-1 composite score
+        'corr_at_earnings': None,
+        'corr_now': None,
+        'corr_delta': None,
+        'decorrelation_score': None,
         'price_vs_rev_divergence': None,
         'quarters_available': 0,
-        'earnings_date_price': None,    # price on last earnings date
-        'current_price_used': None,     # live price plugged in
+        'aligned_quarters': 0,
+        'earnings_date_price': None,
+        'current_price_used': None,
         'latest_rev_change_pct': None,
         'price_change_since_earnings_pct': None,
         'correlation_history': [],
+        'debug': '',
     }
 
     # --- Get fundamental data (already fetched) ---
     fund = config.fundamental_data.get(symbol)
     if not fund:
+        result['debug'] = 'no_fundamental_data'
         return result
 
     revenues = fund.get('revenue', [])
     dates = fund.get('dates', [])
     window = config.corr_window_quarters  # 5
 
+    result['quarters_available'] = len(revenues)
+
     if len(revenues) < window:
+        result['debug'] = f'insufficient_quarters:{len(revenues)}<{window}'
         return result
 
-    # --- Fetch monthly prices for this symbol ---
-    monthly_prices = fetch_quarterly_prices_for_correlation(symbol, len(revenues) + 2)
-    if not monthly_prices:
+    if len(dates) < window:
+        result['debug'] = f'insufficient_dates:{len(dates)}<{window}'
+        return result
+
+    # --- Fetch DAILY prices for this symbol ---
+    daily_bars = fetch_prices_for_correlation(symbol, len(revenues) + 2)
+    if not daily_bars:
+        result['debug'] = 'no_daily_bars'
         return result
 
     # --- Align prices to each quarter's filing date ---
     aligned_prices = []
     aligned_revenues = []
     aligned_dates = []
+    skipped = []
 
     for i in range(len(revenues)):
         if i >= len(dates):
             break
-        price = get_price_at_quarter_end(monthly_prices, dates[i])
-        rev = revenues[i]
 
-        if price is not None and rev is not None and rev != 0:
-            aligned_prices.append(price)
-            aligned_revenues.append(rev)
-            aligned_dates.append(dates[i])
+        rev = revenues[i]
+        date_str = dates[i]
+
+        # Skip quarters with zero or missing revenue
+        if rev is None or rev == 0:
+            skipped.append(f"q{i}:zero_rev")
+            continue
+
+        # Skip quarters with empty date
+        if not date_str or len(date_str) < 8:
+            skipped.append(f"q{i}:bad_date")
+            continue
+
+        price = find_price_on_date(daily_bars, date_str)
+
+        if price is None:
+            skipped.append(f"q{i}:{date_str}:no_price")
+            continue
+
+        aligned_prices.append(price)
+        aligned_revenues.append(rev)
+        aligned_dates.append(date_str)
 
     n = len(aligned_prices)
-    result['quarters_available'] = n
+    result['aligned_quarters'] = n
 
     if n < window:
+        result['debug'] = (f'alignment_failed:{n}_aligned_of_'
+                           f'{len(revenues)}_quarters|skipped={skipped}')
         return result
 
     # --- Use the last `window` quarters ---
     trail_prices = np.array(aligned_prices[-window:], dtype=float)
     trail_revs = np.array(aligned_revenues[-window:], dtype=float)
 
-    # The price on the most recent earnings date (last aligned quarter)
-    earnings_date_price = trail_prices[-1]
-    result['earnings_date_price'] = round(float(earnings_date_price), 2)
+    # The price on the most recent earnings date
+    earnings_date_price = float(trail_prices[-1])
+    result['earnings_date_price'] = round(earnings_date_price, 2)
 
     # =====================================================================
     # CORRELATION AT EARNINGS DATE
-    # This is the correlation as it stood when the last earnings were filed.
+    # Correlation as it stood when the last earnings were filed.
     # Uses the actual price on the filing date for the most recent quarter.
     # =====================================================================
     result['corr_at_earnings'] = _pearson_corr(trail_prices, trail_revs)
 
+    if result['corr_at_earnings'] is None:
+        result['debug'] = (f'pearson_failed_at_earnings|'
+                           f'prices={trail_prices.tolist()}|'
+                           f'revs={trail_revs.tolist()}')
+        return result
+
     # =====================================================================
     # CORRELATION NOW (with live price)
     # Same trailing revenue, but swap the most recent quarter's price
-    # with today's live price to see how price drift has changed things.
+    # with today's live price.
     # =====================================================================
     live_price = current_live_price
     if live_price is None:
-        # Fall back to 52-week midpoint or last known price
         w = config.week52_data.get(symbol, {})
         if w.get('current'):
             live_price = w['current']
         elif w.get('high') and w.get('low'):
             live_price = (w['high'] + w['low']) / 2
 
-    if live_price is not None:
+    if live_price is not None and live_price > 0:
         result['current_price_used'] = round(float(live_price), 2)
 
-        # Create modified price array with live price replacing most recent
+        # Replace most recent quarter's price with live price
         live_prices = trail_prices.copy()
-        live_prices[-1] = live_price
+        live_prices[-1] = float(live_price)
 
         result['corr_now'] = _pearson_corr(live_prices, trail_revs)
 
@@ -360,18 +410,20 @@ def calculate_price_revenue_correlation(symbol: str, current_live_price: Optiona
             result['price_change_since_earnings_pct'] = round(
                 ((live_price - earnings_date_price) / earnings_date_price) * 100, 2
             )
+    else:
+        result['debug'] = f'no_live_price|earnings_corr={result["corr_at_earnings"]}'
+        # Still have corr_at_earnings, just no delta
+        result['corr_now'] = result['corr_at_earnings']
 
     # =====================================================================
     # CORRELATION DELTA = corr_now - corr_at_earnings
-    # Negative → decorrelating since last earnings
-    # Positive → re-correlating since last earnings
     # =====================================================================
     if result['corr_at_earnings'] is not None and result['corr_now'] is not None:
         result['corr_delta'] = round(
             result['corr_now'] - result['corr_at_earnings'], 4
         )
 
-    # --- Rolling correlation history (for sparkline / audit) ---
+    # --- Rolling correlation history ---
     if n >= window:
         for end_idx in range(window, n + 1):
             start_idx = end_idx - window
@@ -389,17 +441,15 @@ def calculate_price_revenue_correlation(symbol: str, current_live_price: Optiona
                 ((rev_curr - rev_prev) / abs(rev_prev)) * 100, 2
             )
 
-    # --- Decorrelation Score (0 to 1, higher = more decorrelated) ---
+    # --- Decorrelation Score (0 to 1) ---
     corr_now = result['corr_now']
     corr_delta = result['corr_delta']
 
     if corr_now is not None:
-        # Component 1: How low is the current absolute correlation? (0 to 0.5)
-        # corr of ±1.0 → 0 pts | corr of 0.0 → 0.5 pts
+        # Component 1: low absolute correlation (0 to 0.5)
         abs_decorr = max(0, (1.0 - abs(corr_now)) * 0.5)
 
-        # Component 2: How much has it dropped since earnings? (0 to 0.5)
-        # delta of -1.0 → 0.5 pts | delta of 0 → 0 pts
+        # Component 2: correlation dropping since earnings (0 to 0.5)
         delta_score = 0.0
         if corr_delta is not None:
             delta_score = max(0, min(0.5, (-corr_delta) * 0.5))
@@ -418,23 +468,24 @@ def calculate_price_revenue_correlation(symbol: str, current_live_price: Optiona
         else:
             result['price_vs_rev_divergence'] = 'ALIGNED'
     elif price_chg is not None:
-        # No revenue change data, just use price movement magnitude
         if abs(price_chg) > 15:
             result['price_vs_rev_divergence'] = (
                 'PRICE_AHEAD' if price_chg > 0 else 'PRICE_BEHIND')
         else:
             result['price_vs_rev_divergence'] = 'ALIGNED'
 
+    result['debug'] = 'ok'
     return result
 
 
 def calculate_all_correlations():
     """
     Calculate price:revenue correlations for all non-ETF symbols.
-    ETFs don't have revenue, so they're skipped.
     """
     print("\n📊 CALCULATING PRICE:REVENUE CORRELATIONS...")
+    print(f"   Window: {config.corr_window_quarters} quarters")
     ok = fail = skip = 0
+    debug_summary = defaultdict(list)
 
     for i, sym in enumerate(config.symbols):
         # Skip ETFs
@@ -445,44 +496,62 @@ def calculate_all_correlations():
         # Skip if no fundamental data
         if sym not in config.fundamental_data:
             skip += 1
+            debug_summary['no_fundamentals'].append(sym)
             continue
 
         try:
-            # Pass current price from 52-week data as initial estimate
-            # (live price will be used in real-time recalc later)
             w = config.week52_data.get(sym, {})
             init_price = w.get('current')
 
             corr_data = calculate_price_revenue_correlation(sym, init_price)
             config.correlation_data[sym] = corr_data
 
+            dbg = corr_data.get('debug', '')
+
             if corr_data['corr_at_earnings'] is not None:
                 ok += 1
                 delta_str = fmt_corr_delta(corr_data.get('corr_delta'))
                 ep = corr_data.get('earnings_date_price', '?')
                 cp = corr_data.get('current_price_used', '?')
-                if corr_data.get('decorrelation_score', 0) > 0.3:
-                    print(f"   🔔 {sym}: "
-                          f"@earnings={corr_data['corr_at_earnings']:.3f} "
-                          f"@now={corr_data.get('corr_now', '?')}"
-                          f" Δ={delta_str}"
-                          f" (${ep}→${cp})"
-                          f" decor={corr_data['decorrelation_score']:.3f}"
-                          f" [{corr_data.get('price_vs_rev_divergence', '?')}]")
+                pchg = corr_data.get('price_change_since_earnings_pct', '?')
+
+                # Always print results during init for verification
+                decor = corr_data.get('decorrelation_score', 0)
+                flag = "🔔" if decor and decor > 0.3 else "  "
+                print(f"   {flag} {sym:6s}: "
+                      f"@earn={corr_data['corr_at_earnings']:+.3f} "
+                      f"@now={corr_data.get('corr_now', '?'):+.3f}"
+                      f"  Δ={delta_str:>8s}"
+                      f"  (${ep}→${cp} {pchg:+.1f}%)"
+                      f"  decor={decor:.3f}"
+                      f"  [{corr_data.get('price_vs_rev_divergence', '?'):>12s}]"
+                      f"  aligned={corr_data.get('aligned_quarters', 0)}q")
             else:
                 fail += 1
+                reason = dbg.split('|')[0] if dbg else 'unknown'
+                debug_summary[reason].append(sym)
+                print(f"      ✗ {sym:6s}: {dbg}")
+
         except Exception as e:
-            print(f"   ⚠️ {sym} correlation error: {e}")
+            print(f"      ⚠️ {sym} correlation error: {e}")
+            import traceback
+            traceback.print_exc()
             fail += 1
 
         if (i + 1) % 10 == 0:
-            print(f"   📈 Correlations: {i + 1}/{len(config.symbols)} "
+            print(f"   --- Progress: {i + 1}/{len(config.symbols)} "
                   f"(✓{ok} ✗{fail} ⏭{skip})")
 
         time.sleep(0.15)
 
-    print(f"✅ Correlations: {ok} calculated, {fail} failed, {skip} skipped\n")
+    # Print summary of failures for debugging
+    if debug_summary:
+        print(f"\n   📋 FAILURE SUMMARY:")
+        for reason, syms in sorted(debug_summary.items()):
+            print(f"      {reason}: {', '.join(syms[:10])}"
+                  f"{'...' if len(syms) > 10 else ''} ({len(syms)})")
 
+    print(f"\n✅ Correlations: {ok} calculated, {fail} failed, {skip} skipped\n")
 # ============================================================================
 # FUNDAMENTAL DATA
 # ============================================================================
