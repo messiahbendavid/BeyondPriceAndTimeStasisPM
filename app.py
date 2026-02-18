@@ -32,7 +32,8 @@ import requests
 # CONFIG
 # ============================================================================
 
-POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "PnzhJOXEJO7tSpHr0ct2zjFKi6XO0yGi")
+POLYGON_API_KEY = os.environ.get(
+    "POLYGON_API_KEY", "PnzhJOXEJO7tSpHr0ct2zjFKi6XO0yGi")
 
 
 @dataclass
@@ -68,7 +69,6 @@ class Config:
     fundamental_slopes: Dict[str, Dict] = field(default_factory=dict)
     correlation_data: Dict[str, Dict] = field(default_factory=dict)
     min_tradable_stasis: int = 3
-    # minimum quarters needed for correlation window
     corr_window_quarters: int = 5
 
 
@@ -120,7 +120,8 @@ class StasisInfo:
         return self.start_time.strftime("%m/%d %H:%M")
 
     def get_price_change_pct(self, p: float) -> float:
-        return (p - self.start_price) / self.start_price * 100 if self.start_price else 0
+        return ((p - self.start_price) / self.start_price * 100
+                if self.start_price else 0)
 
 
 # ============================================================================
@@ -145,18 +146,17 @@ def fmt_slope(v):
 def fmt_rr(rr):
     if rr is None:
         return "—"
-    return "0:1" if rr <= 0 else (f"{rr:.2f}:1" if rr < 10 else f"{rr:.0f}:1")
+    return "0:1" if rr <= 0 else (
+        f"{rr:.2f}:1" if rr < 10 else f"{rr:.0f}:1")
 
 
 def fmt_corr(v):
-    """Format correlation value for display."""
     if v is None:
         return "—"
     return f"{v:+.3f}"
 
 
 def fmt_corr_delta(v):
-    """Format correlation delta — negative means decorrelating."""
     if v is None:
         return "—"
     arrow = "↘" if v < -0.05 else ("↗" if v > 0.05 else "→")
@@ -165,327 +165,306 @@ def fmt_corr_delta(v):
 
 # ============================================================================
 # PRICE:REVENUE CORRELATION ENGINE
+# (Lifted directly from the proven standalone script)
 # ============================================================================
 
 
-# ============================================================================
-# PRICE:REVENUE CORRELATION ENGINE
-# ============================================================================
-
-
-def fetch_prices_for_correlation(symbol: str, num_quarters: int = 8) -> List[Dict]:
+def _corr_fetch_financials(symbol: str) -> Optional[Dict]:
     """
-    Fetch DAILY closing prices going back far enough to cover the quarterly
-    filing dates. Returns list of {'date': 'YYYY-MM-DD', 'close': float}.
-    
-    Using daily bars instead of monthly — monthly bars have alignment issues
-    where filing dates fall between bar timestamps.
+    Fetch quarterly financials from Polygon for correlation analysis.
+    Returns dict with 'dates' and 'revenue' lists (oldest first).
+    Separate from the main fundamental fetch to keep correlation
+    self-contained with the exact logic that works in standalone.
     """
+    url = (f"{config.polygon_rest_url}/vX/reference/financials"
+           f"?ticker={symbol}&timeframe=quarterly&limit=24"
+           f"&sort=filing_date&order=desc&apiKey={config.polygon_api_key}")
+
+    resp = requests.get(url, timeout=30)
+    if resp.status_code != 200:
+        return None
+
+    results = resp.json().get('results', [])
+    if not results:
+        return None
+
+    dates = []
+    revenue = []
+
+    for r in results:
+        try:
+            fi = r.get('financials', {})
+            inc = fi.get('income_statement', {})
+            rev = inc.get('revenues', {}).get('value', 0) or 0
+            filing_date = r.get('filing_date', '')
+
+            if filing_date and rev != 0:
+                dates.append(filing_date)
+                revenue.append(rev)
+        except Exception:
+            continue
+
+    # Reverse to oldest-first
+    dates = dates[::-1]
+    revenue = revenue[::-1]
+
+    return {'dates': dates, 'revenue': revenue}
+
+
+def _corr_fetch_daily_prices(symbol: str, start_date: str,
+                             end_date: str) -> pd.DataFrame:
+    """
+    Fetch daily OHLCV bars from Polygon.
+    Returns DataFrame with columns: date, close
+    """
+    url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/day/"
+           f"{start_date}/{end_date}"
+           f"?adjusted=true&sort=asc&limit=5000"
+           f"&apiKey={config.polygon_api_key}")
+
+    resp = requests.get(url, timeout=20)
+    if resp.status_code != 200:
+        return pd.DataFrame()
+
+    results = resp.json().get('results', [])
+    if not results:
+        return pd.DataFrame()
+
+    rows = []
+    for bar in results:
+        dt = datetime.fromtimestamp(bar['t'] / 1000)
+        rows.append({'date': dt.strftime('%Y-%m-%d'), 'close': bar['c']})
+
+    return pd.DataFrame(rows)
+
+
+def _corr_find_price_on_date(prices_df: pd.DataFrame, target_date: str,
+                             max_lookback_days: int = 10) -> Optional[float]:
+    """
+    Find closing price on or just before target_date.
+    Handles weekends/holidays by looking back up to max_lookback_days.
+    """
+    if prices_df.empty or not target_date:
+        return None
     try:
-        end = datetime.now()
-        # Go back enough: ~90 days per quarter plus buffer
-        start = end - timedelta(days=num_quarters * 95 + 30)
+        target = pd.Timestamp(target_date)
+    except Exception:
+        return None
 
-        url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/day/"
-               f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-               f"?adjusted=true&sort=asc&limit=5000&apiKey={config.polygon_api_key}")
+    df = prices_df.copy()
+    df['dt'] = pd.to_datetime(df['date'])
 
-        resp = requests.get(url, timeout=20)
-        if resp.status_code != 200:
-            print(f"      ⚠️ {symbol} daily bars HTTP {resp.status_code}")
-            return []
+    mask = df['dt'] <= target
+    candidates = df[mask]
+    if candidates.empty:
+        return None
 
-        results = resp.json().get('results', [])
-        if not results:
-            print(f"      ⚠️ {symbol} no daily bar results")
-            return []
+    last_row = candidates.iloc[-1]
+    gap = (target - last_row['dt']).days
 
-        bars = []
-        for bar in results:
-            dt = datetime.fromtimestamp(bar['t'] / 1000)
-            bars.append({
-                'date': dt.strftime('%Y-%m-%d'),
-                'date_obj': dt,
-                'close': bar['c']
-            })
-        return bars
-
-    except Exception as e:
-        print(f"      ⚠️ {symbol} daily price fetch failed: {e}")
-        return []
+    if gap <= max_lookback_days:
+        return float(last_row['close'])
+    return None
 
 
-def find_price_on_date(daily_bars: List[Dict], target_date_str: str,
-                       max_lookback_days: int = 10) -> Optional[float]:
+def _corr_align_prices_to_quarters(
+        financials: Dict, prices_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Find the closing price on or just before a target date.
-    Uses binary-search style lookup on sorted daily bars.
-    
-    Much more reliable than monthly bar alignment.
+    For each quarterly filing date, find the stock price on that date.
+    Returns DataFrame with: quarter, date, revenue, price
     """
-    if not daily_bars or not target_date_str:
-        return None
+    dates = financials['dates']
+    revenues = financials['revenue']
 
-    try:
-        target = datetime.strptime(target_date_str[:10], '%Y-%m-%d')
-    except (ValueError, TypeError):
-        return None
+    rows = []
+    for i in range(len(dates)):
+        filing_date = dates[i]
+        rev = revenues[i]
+        price = _corr_find_price_on_date(prices_df, filing_date)
+        rows.append({
+            'quarter': i,
+            'date': filing_date,
+            'revenue': rev,
+            'price': price,
+        })
 
-    best_price = None
-    best_gap = max_lookback_days + 1
-
-    for bar in daily_bars:
-        gap = (target - bar['date_obj']).days
-        # We want bars ON or BEFORE the target date
-        if 0 <= gap < best_gap:
-            best_gap = gap
-            best_price = bar['close']
-        # Also accept bars 1 day AFTER (for weekends/holidays)
-        elif -1 <= gap < 0 and best_price is None:
-            best_price = bar['close']
-
-    return best_price
+    return pd.DataFrame(rows)
 
 
-def _pearson_corr(prices: np.ndarray, revenues: np.ndarray) -> Optional[float]:
-    """Safe Pearson correlation between two arrays of equal length."""
-    if len(prices) < 3 or len(revenues) < 3:
-        return None
-    if len(prices) != len(revenues):
+def _corr_pearson(prices: np.ndarray,
+                  revenues: np.ndarray) -> Optional[float]:
+    """Safe Pearson correlation."""
+    if len(prices) != len(revenues) or len(prices) < 3:
         return None
     if np.std(prices) < 1e-10 or np.std(revenues) < 1e-10:
         return None
     try:
-        corr = np.corrcoef(prices, revenues)[0, 1]
-        if np.isnan(corr) or np.isinf(corr):
-            return None
-        return round(float(corr), 4)
+        c = np.corrcoef(prices, revenues)[0, 1]
+        return None if (np.isnan(c) or np.isinf(c)) else round(float(c), 4)
     except Exception:
         return None
 
 
-def calculate_price_revenue_correlation(
-        symbol: str, current_live_price: Optional[float] = None) -> Dict:
+def _corr_fetch_current_price(symbol: str) -> Optional[float]:
+    """Get the most recent closing price."""
+    end = datetime.now()
+    start = end - timedelta(days=7)
+    url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{symbol}/range/1/day/"
+           f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+           f"?adjusted=true&sort=desc&limit=5"
+           f"&apiKey={config.polygon_api_key}")
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            results = resp.json().get('results', [])
+            if results:
+                return results[0]['c']
+    except Exception:
+        pass
+    return None
+
+
+def calculate_symbol_correlation(symbol: str) -> Optional[Dict]:
     """
-    Calculate the 5-quarter price:revenue correlation in two states:
-
-    1. corr_at_earnings — correlation using the PRICE ON THE LAST EARNINGS DATE
-       paired with 5 trailing quarters of revenue.
-
-    2. corr_now — same 5 trailing quarters of revenue, but replacing the most
-       recent quarter's paired price with TODAY'S LIVE PRICE.
-
-    3. corr_delta = corr_now - corr_at_earnings
-       Negative → price is decorrelating from revenue since last earnings.
-       Positive → price is re-correlating toward revenue.
+    Full correlation pipeline for one symbol.
+    This is the EXACT logic from the standalone script that works.
+    Returns the result dict or None.
     """
+    window = config.corr_window_quarters
+
+    # 1. Fetch financials
+    financials = _corr_fetch_financials(symbol)
+    if not financials or len(financials['revenue']) < window:
+        return None
+    time.sleep(0.15)
+
+    # 2. Determine date range for price data
+    earliest_date = financials['dates'][0]
+    try:
+        earliest_dt = (datetime.strptime(earliest_date, '%Y-%m-%d')
+                       - timedelta(days=30))
+        start_date = earliest_dt.strftime('%Y-%m-%d')
+    except Exception:
+        start_date = '2020-01-01'
+    end_date = datetime.now().strftime('%Y-%m-%d')
+
+    # 3. Fetch daily prices
+    prices_df = _corr_fetch_daily_prices(symbol, start_date, end_date)
+    if prices_df.empty:
+        return None
+    time.sleep(0.15)
+
+    # 4. Align prices to filing dates
+    aligned = _corr_align_prices_to_quarters(financials, prices_df)
+
+    # 5. Get current price
+    current_price = _corr_fetch_current_price(symbol)
+    if current_price is None and not prices_df.empty:
+        current_price = prices_df.iloc[-1]['close']
+    if current_price is None:
+        return None
+    time.sleep(0.15)
+
+    # 6. Calculate correlations
     result = {
+        'symbol': symbol,
         'corr_at_earnings': None,
         'corr_now': None,
         'corr_delta': None,
         'decorrelation_score': None,
         'price_vs_rev_divergence': None,
-        'quarters_available': 0,
-        'aligned_quarters': 0,
         'earnings_date_price': None,
-        'current_price_used': None,
-        'latest_rev_change_pct': None,
+        'current_price': current_price,
         'price_change_since_earnings_pct': None,
-        'correlation_history': [],
-        'debug': '',
+        'latest_rev_change_pct': None,
+        'aligned_count': 0,
     }
 
-    # --- Get fundamental data (already fetched) ---
-    fund = config.fundamental_data.get(symbol)
-    if not fund:
-        result['debug'] = 'no_fundamental_data'
-        return result
-
-    revenues = fund.get('revenue', [])
-    dates = fund.get('dates', [])
-    window = config.corr_window_quarters  # 5
-
-    result['quarters_available'] = len(revenues)
-
-    if len(revenues) < window:
-        result['debug'] = f'insufficient_quarters:{len(revenues)}<{window}'
-        return result
-
-    if len(dates) < window:
-        result['debug'] = f'insufficient_dates:{len(dates)}<{window}'
-        return result
-
-    # --- Fetch DAILY prices for this symbol ---
-    daily_bars = fetch_prices_for_correlation(symbol, len(revenues) + 2)
-    if not daily_bars:
-        result['debug'] = 'no_daily_bars'
-        return result
-
-    # --- Align prices to each quarter's filing date ---
-    aligned_prices = []
-    aligned_revenues = []
-    aligned_dates = []
-    skipped = []
-
-    for i in range(len(revenues)):
-        if i >= len(dates):
-            break
-
-        rev = revenues[i]
-        date_str = dates[i]
-
-        # Skip quarters with zero or missing revenue
-        if rev is None or rev == 0:
-            skipped.append(f"q{i}:zero_rev")
-            continue
-
-        # Skip quarters with empty date
-        if not date_str or len(date_str) < 8:
-            skipped.append(f"q{i}:bad_date")
-            continue
-
-        price = find_price_on_date(daily_bars, date_str)
-
-        if price is None:
-            skipped.append(f"q{i}:{date_str}:no_price")
-            continue
-
-        aligned_prices.append(price)
-        aligned_revenues.append(rev)
-        aligned_dates.append(date_str)
-
-    n = len(aligned_prices)
-    result['aligned_quarters'] = n
+    # Drop rows with missing prices
+    valid = aligned.dropna(subset=['price']).copy().reset_index(drop=True)
+    n = len(valid)
+    result['aligned_count'] = n
 
     if n < window:
-        result['debug'] = (f'alignment_failed:{n}_aligned_of_'
-                           f'{len(revenues)}_quarters|skipped={skipped}')
         return result
 
-    # --- Use the last `window` quarters ---
-    trail_prices = np.array(aligned_prices[-window:], dtype=float)
-    trail_revs = np.array(aligned_revenues[-window:], dtype=float)
+    # Use the last `window` quarters
+    tail = valid.tail(window).copy()
+    trail_prices = tail['price'].values.astype(float)
+    trail_revs = tail['revenue'].values.astype(float)
 
-    # The price on the most recent earnings date
-    earnings_date_price = float(trail_prices[-1])
-    result['earnings_date_price'] = round(earnings_date_price, 2)
+    earnings_price = float(trail_prices[-1])
+    result['earnings_date_price'] = round(earnings_price, 2)
 
-    # =====================================================================
-    # CORRELATION AT EARNINGS DATE
-    # Correlation as it stood when the last earnings were filed.
-    # Uses the actual price on the filing date for the most recent quarter.
-    # =====================================================================
-    result['corr_at_earnings'] = _pearson_corr(trail_prices, trail_revs)
+    # -- CORRELATION AT EARNINGS (all original prices) --
+    corr_earn = _corr_pearson(trail_prices, trail_revs)
+    result['corr_at_earnings'] = corr_earn
 
-    if result['corr_at_earnings'] is None:
-        result['debug'] = (f'pearson_failed_at_earnings|'
-                           f'prices={trail_prices.tolist()}|'
-                           f'revs={trail_revs.tolist()}')
+    if corr_earn is None:
         return result
 
-    # =====================================================================
-    # CORRELATION NOW (with live price)
-    # Same trailing revenue, but swap the most recent quarter's price
-    # with today's live price.
-    # =====================================================================
-    live_price = current_live_price
-    if live_price is None:
-        w = config.week52_data.get(symbol, {})
-        if w.get('current'):
-            live_price = w['current']
-        elif w.get('high') and w.get('low'):
-            live_price = (w['high'] + w['low']) / 2
+    # -- CORRELATION NOW (replace last price with current live price) --
+    live_prices = trail_prices.copy()
+    live_prices[-1] = current_price
 
-    if live_price is not None and live_price > 0:
-        result['current_price_used'] = round(float(live_price), 2)
+    corr_now = _corr_pearson(live_prices, trail_revs)
+    result['corr_now'] = corr_now
 
-        # Replace most recent quarter's price with live price
-        live_prices = trail_prices.copy()
-        live_prices[-1] = float(live_price)
+    # -- DELTA --
+    if corr_earn is not None and corr_now is not None:
+        result['corr_delta'] = round(corr_now - corr_earn, 4)
 
-        result['corr_now'] = _pearson_corr(live_prices, trail_revs)
+    # -- PRICE CHANGE SINCE EARNINGS --
+    if earnings_price > 0:
+        result['price_change_since_earnings_pct'] = round(
+            ((current_price - earnings_price) / earnings_price) * 100, 2)
 
-        # Price change since earnings
-        if earnings_date_price > 0:
-            result['price_change_since_earnings_pct'] = round(
-                ((live_price - earnings_date_price) / earnings_date_price) * 100, 2
-            )
-    else:
-        result['debug'] = f'no_live_price|earnings_corr={result["corr_at_earnings"]}'
-        # Still have corr_at_earnings, just no delta
-        result['corr_now'] = result['corr_at_earnings']
-
-    # =====================================================================
-    # CORRELATION DELTA = corr_now - corr_at_earnings
-    # =====================================================================
-    if result['corr_at_earnings'] is not None and result['corr_now'] is not None:
-        result['corr_delta'] = round(
-            result['corr_now'] - result['corr_at_earnings'], 4
-        )
-
-    # --- Rolling correlation history ---
-    if n >= window:
-        for end_idx in range(window, n + 1):
-            start_idx = end_idx - window
-            c = _pearson_corr(
-                np.array(aligned_prices[start_idx:end_idx], dtype=float),
-                np.array(aligned_revenues[start_idx:end_idx], dtype=float))
-            result['correlation_history'].append(c)
-
-    # --- Latest quarter revenue change ---
+    # -- LATEST REVENUE CHANGE --
     if n >= 2:
-        rev_prev = aligned_revenues[-2]
-        rev_curr = aligned_revenues[-1]
+        rev_prev = valid.iloc[-2]['revenue']
+        rev_curr = valid.iloc[-1]['revenue']
         if rev_prev and rev_prev != 0:
             result['latest_rev_change_pct'] = round(
-                ((rev_curr - rev_prev) / abs(rev_prev)) * 100, 2
-            )
+                ((rev_curr - rev_prev) / abs(rev_prev)) * 100, 2)
 
-    # --- Decorrelation Score (0 to 1) ---
-    corr_now = result['corr_now']
-    corr_delta = result['corr_delta']
-
+    # -- DECORRELATION SCORE (0 to 1) --
     if corr_now is not None:
-        # Component 1: low absolute correlation (0 to 0.5)
-        abs_decorr = max(0, (1.0 - abs(corr_now)) * 0.5)
+        abs_component = max(0, (1.0 - abs(corr_now)) * 0.5)
+        delta_component = 0.0
+        if result['corr_delta'] is not None:
+            delta_component = max(0, min(0.5, (-result['corr_delta']) * 0.5))
+        result['decorrelation_score'] = round(
+            abs_component + delta_component, 4)
 
-        # Component 2: correlation dropping since earnings (0 to 0.5)
-        delta_score = 0.0
-        if corr_delta is not None:
-            delta_score = max(0, min(0.5, (-corr_delta) * 0.5))
+    # -- DIVERGENCE DIRECTION --
+    pchg = result.get('price_change_since_earnings_pct')
+    rchg = result.get('latest_rev_change_pct')
 
-        result['decorrelation_score'] = round(abs_decorr + delta_score, 4)
-
-    # --- Price vs Revenue divergence direction ---
-    price_chg = result.get('price_change_since_earnings_pct')
-    rev_chg = result.get('latest_rev_change_pct')
-
-    if price_chg is not None and rev_chg is not None:
-        if price_chg > rev_chg + 10:
+    if pchg is not None and rchg is not None:
+        if pchg > rchg + 10:
             result['price_vs_rev_divergence'] = 'PRICE_AHEAD'
-        elif rev_chg > price_chg + 10:
+        elif rchg > pchg + 10:
             result['price_vs_rev_divergence'] = 'PRICE_BEHIND'
         else:
             result['price_vs_rev_divergence'] = 'ALIGNED'
-    elif price_chg is not None:
-        if abs(price_chg) > 15:
+    elif pchg is not None:
+        if abs(pchg) > 15:
             result['price_vs_rev_divergence'] = (
-                'PRICE_AHEAD' if price_chg > 0 else 'PRICE_BEHIND')
+                'PRICE_AHEAD' if pchg > 0 else 'PRICE_BEHIND')
         else:
             result['price_vs_rev_divergence'] = 'ALIGNED'
 
-    result['debug'] = 'ok'
     return result
 
 
 def calculate_all_correlations():
     """
     Calculate price:revenue correlations for all non-ETF symbols.
+    Uses the exact same pipeline as the standalone script.
     """
     print("\n📊 CALCULATING PRICE:REVENUE CORRELATIONS...")
     print(f"   Window: {config.corr_window_quarters} quarters")
     ok = fail = skip = 0
-    debug_summary = defaultdict(list)
 
     for i, sym in enumerate(config.symbols):
         # Skip ETFs
@@ -493,65 +472,55 @@ def calculate_all_correlations():
             skip += 1
             continue
 
-        # Skip if no fundamental data
-        if sym not in config.fundamental_data:
-            skip += 1
-            debug_summary['no_fundamentals'].append(sym)
-            continue
-
         try:
-            w = config.week52_data.get(sym, {})
-            init_price = w.get('current')
+            result = calculate_symbol_correlation(sym)
 
-            corr_data = calculate_price_revenue_correlation(sym, init_price)
-            config.correlation_data[sym] = corr_data
-
-            dbg = corr_data.get('debug', '')
-
-            if corr_data['corr_at_earnings'] is not None:
+            if result and result.get('corr_at_earnings') is not None:
+                config.correlation_data[sym] = result
                 ok += 1
-                delta_str = fmt_corr_delta(corr_data.get('corr_delta'))
-                ep = corr_data.get('earnings_date_price', '?')
-                cp = corr_data.get('current_price_used', '?')
-                pchg = corr_data.get('price_change_since_earnings_pct', '?')
 
-                # Always print results during init for verification
-                decor = corr_data.get('decorrelation_score', 0)
+                delta = result.get('corr_delta')
+                decor = result.get('decorrelation_score', 0)
+                ep = result.get('earnings_date_price', '?')
+                cp = result.get('current_price', '?')
+                pchg = result.get('price_change_since_earnings_pct')
+                div = result.get('price_vs_rev_divergence', '?')
+                aligned = result.get('aligned_count', 0)
+
                 flag = "🔔" if decor and decor > 0.3 else "  "
+                delta_s = fmt_corr_delta(delta)
+                pchg_s = f"{pchg:+.1f}%" if pchg is not None else "?"
+
                 print(f"   {flag} {sym:6s}: "
-                      f"@earn={corr_data['corr_at_earnings']:+.3f} "
-                      f"@now={corr_data.get('corr_now', '?'):+.3f}"
-                      f"  Δ={delta_str:>8s}"
-                      f"  (${ep}→${cp} {pchg:+.1f}%)"
+                      f"@earn={result['corr_at_earnings']:+.3f} "
+                      f"@now={result.get('corr_now', 0):+.3f}"
+                      f"  Δ={delta_s:>8s}"
+                      f"  (${ep}→${cp} {pchg_s})"
                       f"  decor={decor:.3f}"
-                      f"  [{corr_data.get('price_vs_rev_divergence', '?'):>12s}]"
-                      f"  aligned={corr_data.get('aligned_quarters', 0)}q")
+                      f"  [{div:>12s}]"
+                      f"  {aligned}q")
+            elif result:
+                config.correlation_data[sym] = result
+                fail += 1
+                print(f"      ✗ {sym:6s}: "
+                      f"aligned={result.get('aligned_count', 0)}q "
+                      f"(need {config.corr_window_quarters})")
             else:
                 fail += 1
-                reason = dbg.split('|')[0] if dbg else 'unknown'
-                debug_summary[reason].append(sym)
-                print(f"      ✗ {sym:6s}: {dbg}")
+                print(f"      ✗ {sym:6s}: no data")
 
         except Exception as e:
-            print(f"      ⚠️ {sym} correlation error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"      ⚠️ {sym} error: {e}")
             fail += 1
 
         if (i + 1) % 10 == 0:
             print(f"   --- Progress: {i + 1}/{len(config.symbols)} "
                   f"(✓{ok} ✗{fail} ⏭{skip})")
 
-        time.sleep(0.15)
+    print(f"\n✅ Correlations: {ok} calculated, {fail} failed, "
+          f"{skip} skipped (ETFs)\n")
 
-    # Print summary of failures for debugging
-    if debug_summary:
-        print(f"\n   📋 FAILURE SUMMARY:")
-        for reason, syms in sorted(debug_summary.items()):
-            print(f"      {reason}: {', '.join(syms[:10])}"
-                  f"{'...' if len(syms) > 10 else ''} ({len(syms)})")
 
-    print(f"\n✅ Correlations: {ok} calculated, {fail} failed, {skip} skipped\n")
 # ============================================================================
 # FUNDAMENTAL DATA
 # ============================================================================
@@ -561,7 +530,8 @@ def fetch_fundamental_data_polygon(sym):
     try:
         url = (f"{config.polygon_rest_url}/vX/reference/financials"
                f"?ticker={sym}&timeframe=quarterly&limit=24"
-               f"&sort=filing_date&order=desc&apiKey={config.polygon_api_key}")
+               f"&sort=filing_date&order=desc"
+               f"&apiKey={config.polygon_api_key}")
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200:
             return None
@@ -581,9 +551,12 @@ def fetch_fundamental_data_polygon(sym):
                 bs = fi.get('balance_sheet', {})
                 rev = inc.get('revenues', {}).get('value', 0) or 0
                 ni = inc.get('net_income_loss', {}).get('value', 0) or 0
-                eps = inc.get('basic_earnings_per_share', {}).get('value', 0) or 0
-                ocf = cf.get('net_cash_flow_from_operating_activities', {}).get('value', 0) or 0
-                cx = cf.get('net_cash_flow_from_investing_activities', {}).get('value', 0) or 0
+                eps = (inc.get('basic_earnings_per_share', {})
+                       .get('value', 0) or 0)
+                ocf = (cf.get('net_cash_flow_from_operating_activities', {})
+                       .get('value', 0) or 0)
+                cx = (cf.get('net_cash_flow_from_investing_activities', {})
+                      .get('value', 0) or 0)
                 ta = bs.get('assets', {}).get('value', 0) or 0
                 tl = bs.get('liabilities', {}).get('value', 0) or 0
                 eq = bs.get('equity', {}).get('value', 0) or 0
@@ -604,12 +577,12 @@ def fetch_fundamental_data_polygon(sym):
                 fund['current_liabilities'].append(cl)
                 fund['total_debt'].append(ltd + std)
                 fund['eps'].append(eps)
-            except:
+            except Exception:
                 continue
         for k in fund:
             fund[k] = fund[k][::-1]
         return fund
-    except:
+    except Exception:
         return None
 
 
@@ -623,26 +596,29 @@ def calculate_slopes(series, ss=4, sl=20):
             e = s.ewm(span=ss, adjust=False).mean()
             if abs(e.iloc[-5]) > 0.0001:
                 s5 = (e.iloc[-1] - e.iloc[-5]) / abs(e.iloc[-5])
-    except:
+    except Exception:
         pass
     try:
         if len(s.dropna()) >= 21:
             e = s.ewm(span=sl, adjust=False).mean()
             if abs(e.iloc[-21]) > 0.0001:
                 s20 = (e.iloc[-1] - e.iloc[-21]) / abs(e.iloc[-21])
-    except:
+    except Exception:
         pass
     return s5, s20
 
 
 def calculate_all_slopes(fund, ratios):
     sl = {}
-    sl['Rev_Slope_5'], sl['Rev_Slope_20'] = calculate_slopes(fund.get('revenue', []))
-    sl['FCF_Slope_5'], sl['FCF_Slope_20'] = calculate_slopes(fund.get('fcf', []))
+    sl['Rev_Slope_5'], sl['Rev_Slope_20'] = calculate_slopes(
+        fund.get('revenue', []))
+    sl['FCF_Slope_5'], sl['FCF_Slope_20'] = calculate_slopes(
+        fund.get('fcf', []))
     for n, k in [('P/E Ratio', 'pe_ratio'), ('Return on Equity', 'roe'),
                  ('Net Profit Margin', 'net_profit_margin'),
                  ('Debt to Equity Ratio', 'debt_to_equity')]:
-        sl[f'{n}_Slope_5'], sl[f'{n}_Slope_20'] = calculate_slopes(ratios.get(k, []))
+        sl[f'{n}_Slope_5'], sl[f'{n}_Slope_20'] = calculate_slopes(
+            ratios.get(k, []))
     fl = ratios.get('fcfy', [])
     sl['FCFY'] = fl[-1] if fl and fl[-1] is not None else None
     return sl
@@ -661,25 +637,32 @@ def fetch_all_fundamental_data():
                     price = (w['high'] + w['low']) / 2
                 eq = fund['shareholders_equity'][-1]
                 mcap = eq * 2 if eq and eq > 0 else 1e9
-                ratios = {k: [] for k in ['pe_ratio', 'roe', 'net_profit_margin',
-                                           'debt_to_equity', 'fcfy']}
+                ratios = {k: [] for k in [
+                    'pe_ratio', 'roe', 'net_profit_margin',
+                    'debt_to_equity', 'fcfy']}
                 for j in range(len(fund['revenue'])):
                     try:
                         eps = fund['eps'][j]
-                        ratios['pe_ratio'].append(price / eps if eps > 0 else None)
+                        ratios['pe_ratio'].append(
+                            price / eps if eps > 0 else None)
                         eq_j = fund['shareholders_equity'][j]
-                        ratios['roe'].append(fund['net_income'][j] / eq_j if eq_j > 0 else None)
+                        ratios['roe'].append(
+                            fund['net_income'][j] / eq_j
+                            if eq_j > 0 else None)
                         rev_j = fund['revenue'][j]
                         ratios['net_profit_margin'].append(
-                            fund['net_income'][j] / rev_j if rev_j else None)
+                            fund['net_income'][j] / rev_j
+                            if rev_j else None)
                         ratios['debt_to_equity'].append(
-                            fund['total_debt'][j] / eq_j if eq_j > 0 else None)
+                            fund['total_debt'][j] / eq_j
+                            if eq_j > 0 else None)
                         if j >= 3:
                             ratios['fcfy'].append(
-                                sum(fund['fcf'][max(0, j - 3):j + 1]) / mcap if mcap else None)
+                                sum(fund['fcf'][max(0, j - 3):j + 1]) / mcap
+                                if mcap else None)
                         else:
                             ratios['fcfy'].append(None)
-                    except:
+                    except Exception:
                         for k in ratios:
                             ratios[k].append(None)
                 slopes = calculate_all_slopes(fund, ratios)
@@ -688,7 +671,7 @@ def fetch_all_fundamental_data():
                 ok += 1
             else:
                 fail += 1
-        except:
+        except Exception:
             fail += 1
         if (i + 1) % 25 == 0:
             print(f"   📈 {i + 1}/{len(config.symbols)} (✓{ok} ✗{fail})")
@@ -697,7 +680,7 @@ def fetch_all_fundamental_data():
 
 
 # ============================================================================
-# MERIT SCORING (UPDATED WITH CORRELATION)
+# MERIT SCORING
 # ============================================================================
 
 
@@ -727,39 +710,40 @@ def calculate_stasis_merit_score(snap):
     return ms
 
 
-def calculate_correlation_merit_score(symbol: str, direction: Optional[str]) -> Tuple[int, Dict]:
+def calculate_correlation_merit_score(
+        symbol: str, direction: Optional[str]) -> Tuple[int, Dict]:
     """
-    Calculate merit score contribution from price:revenue decorrelation.
-    
-    Scoring logic:
-    - High decorrelation score: up to +6 points
-    - Correlation delta (how fast it's decorrelating): up to +4 points  
-    - Direction alignment bonus: up to +3 points
-      * If PRICE_BEHIND and direction=LONG → bonus (price should catch up)
-      * If PRICE_AHEAD and direction=SHORT → bonus (price should correct)
-    
-    Returns: (score, details_dict)
+    Merit score from price:revenue decorrelation.
+
+    Uses the EXACT keys produced by calculate_symbol_correlation():
+      corr_at_earnings, corr_now, corr_delta, decorrelation_score,
+      price_vs_rev_divergence
+
+    Scoring:
+      Decorrelation score tiers:    0-6 pts
+      Correlation delta rate:       0-4 pts
+      Direction alignment bonus:    -1 to +3 pts
     """
     score = 0
     details = {
-        'corr_5q': None,
+        'corr_at_earnings': None,
+        'corr_now': None,
         'corr_delta': None,
         'decor_score': None,
         'divergence': None,
         'corr_merit': 0,
     }
-    
+
     corr = config.correlation_data.get(symbol)
-    if not corr or corr.get('corr_5q') is None:
+    if not corr or corr.get('corr_at_earnings') is None:
         return score, details
-    
-    details['corr_5q'] = corr['corr_5q']
+
+    details['corr_at_earnings'] = corr['corr_at_earnings']
+    details['corr_now'] = corr.get('corr_now')
     details['corr_delta'] = corr.get('corr_delta')
     details['decor_score'] = corr.get('decorrelation_score')
     details['divergence'] = corr.get('price_vs_rev_divergence')
-    details['latest_rev_chg'] = corr.get('latest_rev_change_pct')
-    details['latest_price_chg'] = corr.get('latest_price_change_pct')
-    
+
     # --- Component 1: Decorrelation Score (0-1) → 0-6 points ---
     decor = corr.get('decorrelation_score', 0) or 0
     for threshold, points in [
@@ -768,35 +752,32 @@ def calculate_correlation_merit_score(symbol: str, direction: Optional[str]) -> 
         if decor >= threshold:
             score += points
             break
-    
-    # --- Component 2: Correlation Delta (rate of decorrelation) → 0-4 points ---
+
+    # --- Component 2: Correlation Delta → 0-4 points ---
     delta = corr.get('corr_delta')
     if delta is not None:
-        # More negative delta = faster decorrelation = more points
         for threshold, points in [
             (-0.4, 4), (-0.25, 3), (-0.15, 2), (-0.05, 1)
         ]:
             if delta <= threshold:
                 score += points
                 break
-    
-    # --- Component 3: Direction Alignment Bonus → 0-3 points ---
+
+    # --- Component 3: Direction Alignment → -1 to +3 points ---
     divergence = corr.get('price_vs_rev_divergence')
     if divergence and direction:
-        # Price lagging behind revenue growth + LONG signal = strong buy signal
         if divergence == 'PRICE_BEHIND' and direction == 'LONG':
             score += 3
-        # Price running ahead of revenue + SHORT signal = strong sell signal
         elif divergence == 'PRICE_AHEAD' and direction == 'SHORT':
             score += 3
-        # Misaligned: price ahead but going long, or price behind but shorting
         elif divergence == 'PRICE_AHEAD' and direction == 'LONG':
-            score -= 1  # Slight penalty
+            score -= 1
         elif divergence == 'PRICE_BEHIND' and direction == 'SHORT':
-            score -= 1  # Slight penalty
-    
-    details['corr_merit'] = max(0, score)  # Floor at 0
-    return max(0, score), details
+            score -= 1
+
+    score = max(0, score)
+    details['corr_merit'] = score
+    return score, details
 
 
 def calculate_fundamental_merit_score(symbol, w52_pct):
@@ -812,8 +793,10 @@ def calculate_fundamental_merit_score(symbol, w52_pct):
                     break
         return ms, sd
     for lbl, key, tps in [
-        ('Rev_5', 'Rev_Slope_5', [(0.30, 4), (0.20, 3), (0.10, 2), (0.05, 1)]),
-        ('FCF_5', 'FCF_Slope_5', [(0.40, 4), (0.25, 3), (0.10, 2), (0.05, 1)]),
+        ('Rev_5', 'Rev_Slope_5',
+         [(0.30, 4), (0.20, 3), (0.10, 2), (0.05, 1)]),
+        ('FCF_5', 'FCF_Slope_5',
+         [(0.40, 4), (0.25, 3), (0.10, 2), (0.05, 1)]),
         ('ROE_5', 'Return on Equity_Slope_5', [(0.20, 2), (0.10, 1)]),
         ('NPM_5', 'Net Profit Margin_Slope_5', [(0.20, 2), (0.10, 1)])]:
         v = slopes.get(key)
@@ -824,8 +807,10 @@ def calculate_fundamental_merit_score(symbol, w52_pct):
                     ms += p
                     break
     for lbl, key, tps in [
-        ('PE_5', 'P/E Ratio_Slope_5', [(-0.25, 3), (-0.15, 2), (-0.05, 1)]),
-        ('DE_5', 'Debt to Equity Ratio_Slope_5', [(-0.20, 2), (-0.10, 1)])]:
+        ('PE_5', 'P/E Ratio_Slope_5',
+         [(-0.25, 3), (-0.15, 2), (-0.05, 1)]),
+        ('DE_5', 'Debt to Equity Ratio_Slope_5',
+         [(-0.20, 2), (-0.10, 1)])]:
         v = slopes.get(key)
         sd[lbl] = v
         if v is not None:
@@ -864,28 +849,35 @@ def fetch_52_week_data():
     ok = fail = 0
     for i, sym in enumerate(config.symbols):
         try:
-            url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/day/"
-                   f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-                   f"?adjusted=true&sort=asc&limit=365&apiKey={config.polygon_api_key}")
+            url = (
+                f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/day/"
+                f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+                f"?adjusted=true&sort=asc&limit=365"
+                f"&apiKey={config.polygon_api_key}")
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 res = r.json().get('results', [])
                 if res:
                     hv = max(b['h'] for b in res)
                     lv = min(b['l'] for b in res)
-                    w52[sym] = {'high': hv, 'low': lv, 'range': hv - lv, 'current': res[-1]['c']}
+                    w52[sym] = {'high': hv, 'low': lv,
+                                'range': hv - lv, 'current': res[-1]['c']}
                     ok += 1
                 else:
-                    w52[sym] = {'high': None, 'low': None, 'range': None, 'current': None}
+                    w52[sym] = {'high': None, 'low': None,
+                                'range': None, 'current': None}
                     fail += 1
             else:
-                w52[sym] = {'high': None, 'low': None, 'range': None, 'current': None}
+                w52[sym] = {'high': None, 'low': None,
+                            'range': None, 'current': None}
                 fail += 1
             if (i + 1) % 50 == 0:
-                print(f"   52W: {i + 1}/{len(config.symbols)} (✓{ok} ✗{fail})")
+                print(f"   52W: {i + 1}/{len(config.symbols)} "
+                      f"(✓{ok} ✗{fail})")
             time.sleep(0.12)
-        except:
-            w52[sym] = {'high': None, 'low': None, 'range': None, 'current': None}
+        except Exception:
+            w52[sym] = {'high': None, 'low': None,
+                        'range': None, 'current': None}
             fail += 1
     print(f"✅ 52-week: {ok} ok, {fail} failed\n")
     return w52
@@ -898,14 +890,17 @@ def fetch_volume_data():
     start = end - timedelta(days=45)
     for i, sym in enumerate(config.symbols):
         try:
-            url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/day/"
-                   f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-                   f"?adjusted=true&sort=desc&limit=30&apiKey={config.polygon_api_key}")
+            url = (
+                f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/day/"
+                f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+                f"?adjusted=true&sort=desc&limit=30"
+                f"&apiKey={config.polygon_api_key}")
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
                 res = r.json().get('results', [])
                 if res:
-                    vols[sym] = (sum(b['v'] for b in res) / len(res)) / 1e6
+                    vols[sym] = (
+                        sum(b['v'] for b in res) / len(res)) / 1e6
                 else:
                     vols[sym] = 10.0
             else:
@@ -913,7 +908,7 @@ def fetch_volume_data():
             if (i + 1) % 50 == 0:
                 print(f"   Vol: {i + 1}/{len(config.symbols)}")
             time.sleep(0.12)
-        except:
+        except Exception:
             vols[sym] = 10.0
     print("✅ Volume loaded\n")
     return vols
@@ -924,15 +919,17 @@ def fetch_historical_bars(sym, days=5):
     end = datetime.now()
     start = end - timedelta(days=days)
     try:
-        url = (f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/minute/"
-               f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
-               f"?adjusted=true&sort=asc&limit=50000&apiKey={config.polygon_api_key}")
+        url = (
+            f"{config.polygon_rest_url}/v2/aggs/ticker/{sym}/range/1/minute/"
+            f"{start.strftime('%Y-%m-%d')}/{end.strftime('%Y-%m-%d')}"
+            f"?adjusted=true&sort=asc&limit=50000"
+            f"&apiKey={config.polygon_api_key}")
         r = requests.get(url, timeout=30)
         if r.status_code == 200:
             res = r.json().get('results', [])
-            bars = [{'timestamp': datetime.fromtimestamp(b['t'] / 1000), 'close': b['c']}
-                    for b in res]
-    except:
+            bars = [{'timestamp': datetime.fromtimestamp(b['t'] / 1000),
+                     'close': b['c']} for b in res]
+    except Exception:
         pass
     return bars
 
@@ -1010,13 +1007,16 @@ class Bitstream:
         self.current_stasis = sc
         self.last_bit = bl[-1].bit
         if prev < 2 and sc >= 2 and 0 <= si < len(bl):
-            self.stasis_info = StasisInfo(bl[si].timestamp, bl[si].price, sc)
-        elif sc >= 2 and self.stasis_info and sc > self.stasis_info.peak_stasis:
+            self.stasis_info = StasisInfo(
+                bl[si].timestamp, bl[si].price, sc)
+        elif (sc >= 2 and self.stasis_info
+              and sc > self.stasis_info.peak_stasis):
             self.stasis_info.peak_stasis = sc
         elif prev >= 2 and sc < 2:
             self.stasis_info = None
         if sc >= 2:
-            self.direction = Direction.LONG if self.last_bit == 0 else Direction.SHORT
+            self.direction = (Direction.LONG if self.last_bit == 0
+                              else Direction.SHORT)
             if sc >= 10:
                 self.signal_strength = SignalStrength.VERY_STRONG
             elif sc >= 7:
@@ -1033,10 +1033,12 @@ class Bitstream:
 
     def get_snapshot(self, live_price=None):
         with self._lock:
-            p = live_price if live_price is not None else self.current_live_price
+            p = (live_price if live_price is not None
+                 else self.current_live_price)
             si = self.stasis_info
             tp = sl = rr = None
-            distance_to_tp_pct = distance_to_sl_pct = stasis_price_change_pct = None
+            distance_to_tp_pct = distance_to_sl_pct = None
+            stasis_price_change_pct = None
             if si is not None:
                 stasis_price_change_pct = si.get_price_change_pct(p)
             if self.direction and self.current_stasis >= 2:
@@ -1055,21 +1057,32 @@ class Bitstream:
                     distance_to_sl_pct = (abs(sl - p) / p) * 100
             return {
                 'symbol': self.symbol, 'is_etf': self.is_etf,
-                'threshold': self.threshold, 'threshold_pct': self.threshold * 100,
-                'stasis': self.current_stasis, 'total_bits': self.total_bits,
-                'current_price': p, 'anchor_price': si.start_price if si else None,
-                'direction': self.direction.value if self.direction else None,
-                'signal_strength': self.signal_strength.value if self.signal_strength else None,
-                'is_tradable': (self.current_stasis >= config.min_tradable_stasis
-                                and self.direction is not None and self.volume > 1.0),
-                'stasis_start_str': si.get_start_date_str() if si else "—",
-                'stasis_duration_str': si.get_duration_str() if si else "—",
-                'duration_seconds': si.get_duration().total_seconds() if si else 0,
+                'threshold': self.threshold,
+                'threshold_pct': self.threshold * 100,
+                'stasis': self.current_stasis,
+                'total_bits': self.total_bits,
+                'current_price': p,
+                'anchor_price': si.start_price if si else None,
+                'direction': (self.direction.value
+                              if self.direction else None),
+                'signal_strength': (self.signal_strength.value
+                                    if self.signal_strength else None),
+                'is_tradable': (
+                    self.current_stasis >= config.min_tradable_stasis
+                    and self.direction is not None
+                    and self.volume > 1.0),
+                'stasis_start_str': (si.get_start_date_str()
+                                     if si else "—"),
+                'stasis_duration_str': (si.get_duration_str()
+                                        if si else "—"),
+                'duration_seconds': (si.get_duration().total_seconds()
+                                     if si else 0),
                 'stasis_price_change_pct': stasis_price_change_pct,
                 'take_profit': tp, 'stop_loss': sl, 'risk_reward': rr,
                 'distance_to_tp_pct': distance_to_tp_pct,
                 'distance_to_sl_pct': distance_to_sl_pct,
-                'week52_percentile': calculate_52week_percentile(p, self.symbol),
+                'week52_percentile': calculate_52week_percentile(
+                    p, self.symbol),
                 'volume': self.volume,
             }
 
@@ -1106,23 +1119,28 @@ class PolygonPriceFeed:
                 data = json.loads(msg)
                 for m in (data if isinstance(data, list) else [data]):
                     self._proc(m)
-            except:
+            except Exception:
                 pass
 
         def on_open(ws):
             print("✅ WS connected")
-            ws.send(json.dumps({"action": "auth", "params": config.polygon_api_key}))
+            ws.send(json.dumps({
+                "action": "auth",
+                "params": config.polygon_api_key}))
 
-        self.ws = websocket.WebSocketApp(config.polygon_ws_url,
-                                         on_open=on_open, on_message=on_msg)
+        self.ws = websocket.WebSocketApp(
+            config.polygon_ws_url,
+            on_open=on_open, on_message=on_msg)
         self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
     def _proc(self, msg):
-        if msg.get('ev') == 'status' and msg.get('status') == 'auth_success':
+        if (msg.get('ev') == 'status'
+                and msg.get('status') == 'auth_success'):
             self._sub()
         elif msg.get('ev') in ('A', 'AM', 'T', 'Q'):
             sym = msg.get('sym', '') or msg.get('S', '')
-            price = msg.get('c') or msg.get('vw') or msg.get('p') or msg.get('bp')
+            price = (msg.get('c') or msg.get('vw')
+                     or msg.get('p') or msg.get('bp'))
             if price and sym in self.current_prices:
                 with self.lock:
                     self.current_prices[sym] = float(price)
@@ -1131,8 +1149,9 @@ class PolygonPriceFeed:
     def _sub(self):
         for i in range(0, len(config.symbols), 50):
             batch = config.symbols[i:i + 50]
-            self.ws.send(json.dumps({"action": "subscribe",
-                                     "params": ",".join(f"A.{s}" for s in batch)}))
+            self.ws.send(json.dumps({
+                "action": "subscribe",
+                "params": ",".join(f"A.{s}" for s in batch)}))
             time.sleep(0.1)
         print(f"📡 Subscribed {len(config.symbols)} symbols")
 
@@ -1142,15 +1161,18 @@ class PolygonPriceFeed:
 
     def get_status(self):
         with self.lock:
-            return {'connected': sum(1 for v in self.current_prices.values() if v),
-                    'total': len(config.symbols), 'messages': self.message_count}
+            return {
+                'connected': sum(
+                    1 for v in self.current_prices.values() if v),
+                'total': len(config.symbols),
+                'messages': self.message_count}
 
 
 price_feed = PolygonPriceFeed()
 
 
 # ============================================================================
-# BITSTREAM MANAGER (UPDATED)
+# BITSTREAM MANAGER
 # ============================================================================
 
 
@@ -1172,9 +1194,11 @@ class BitstreamManager:
             bars = fetch_historical_bars(sym, config.history_days)
             if bars:
                 hist[sym] = bars
-            self.backfill_progress = int((i + 1) / len(config.symbols) * 100)
+            self.backfill_progress = int(
+                (i + 1) / len(config.symbols) * 100)
             if (i + 1) % 25 == 0:
-                print(f"   📊 {i + 1}/{len(config.symbols)} ({self.backfill_progress}%)")
+                print(f"   📊 {i + 1}/{len(config.symbols)} "
+                      f"({self.backfill_progress}%)")
             time.sleep(0.12)
         with self.lock:
             for sym, bars in hist.items():
@@ -1183,14 +1207,17 @@ class BitstreamManager:
                 vol = config.volumes.get(sym, 10.0)
                 for th in config.thresholds:
                     key = (sym, th)
-                    self.streams[key] = Bitstream(sym, th, bars[0]['close'], vol)
+                    self.streams[key] = Bitstream(
+                        sym, th, bars[0]['close'], vol)
                     for bar in bars:
-                        self.streams[key].process_price(bar['close'], bar['timestamp'])
+                        self.streams[key].process_price(
+                            bar['close'], bar['timestamp'])
         self.initialized = True
         self.backfill_complete = True
-        tradable = sum(1 for s in self.streams.values()
-                       if s.current_stasis >= config.min_tradable_stasis
-                       and s.direction is not None and s.volume > 1.0)
+        tradable = sum(
+            1 for s in self.streams.values()
+            if s.current_stasis >= config.min_tradable_stasis
+            and s.direction is not None and s.volume > 1.0)
         print(f"✅ Streams: {len(self.streams)} | Tradable: {tradable}")
         print("=" * 60)
 
@@ -1222,7 +1249,8 @@ class BitstreamManager:
             snaps = []
             with self.lock:
                 for s in self.streams.values():
-                    snaps.append(s.get_snapshot(prices.get(s.symbol)))
+                    snaps.append(
+                        s.get_snapshot(prices.get(s.symbol)))
             am = self._build_am(snaps)
             with self.cache_lock:
                 self.cached_am_data = am
@@ -1232,18 +1260,17 @@ class BitstreamManager:
         for s in snaps:
             if s['threshold'] not in config.am_thresholds:
                 continue
-            
+
             sms = calculate_stasis_merit_score(s)
             fms, sd = calculate_fundamental_merit_score(
                 s['symbol'], s.get('week52_percentile'))
-            
-            # Calculate correlation merit score
+
+            # Correlation merit score
             cms, cd = calculate_correlation_merit_score(
                 s['symbol'], s.get('direction'))
-            
-            # Total merit score now includes correlation
+
             tms = sms + fms + cms
-            
+
             rows.append({
                 **s,
                 'sms': sms,
@@ -1263,7 +1290,7 @@ class BitstreamManager:
 manager = BitstreamManager()
 
 # ============================================================================
-# DASH APP (UPDATED WITH CORRELATION COLUMNS & FILTERS)
+# DASH APP
 # ============================================================================
 
 AM_CSS = """
@@ -1273,17 +1300,18 @@ body { background: #f5f0e8 !important; }
 .title-font { font-family: 'Orbitron', sans-serif !important; }
 """
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY],
-                suppress_callback_exceptions=True)
+app = dash.Dash(
+    __name__, external_stylesheets=[dbc.themes.FLATLY],
+    suppress_callback_exceptions=True)
 app.title = "STASIS AM"
 server = app.server
 
-app.index_string = f'''<!DOCTYPE html>
+app.index_string = '''<!DOCTYPE html>
 <html><head>
-{{%metas%}}<title>{{%title%}}</title>{{%favicon%}}{{%css%}}
-<style>{AM_CSS}</style>
+{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<style>''' + AM_CSS + '''</style>
 </head><body>
-{{%app_entry%}}<footer>{{%config%}}{{%scripts%}}{{%renderer%}}</footer>
+{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
 </body></html>'''
 
 app.layout = html.Div([
@@ -1294,31 +1322,37 @@ app.layout = html.Div([
     html.Div([
         html.Span("📈", style={'fontSize': '22px'}),
         html.Span(" STASIS AM", className="title-font ms-2",
-                  style={'fontSize': '16px', 'fontWeight': '700', 'color': '#1a5c2a',
-                         'letterSpacing': '2px'}),
+                  style={'fontSize': '16px', 'fontWeight': '700',
+                         'color': '#1a5c2a', 'letterSpacing': '2px'}),
         html.Span(" — ALPHA MARKETS", className="title-font",
-                  style={'fontSize': '9px', 'color': '#888', 'letterSpacing': '1px'}),
+                  style={'fontSize': '9px', 'color': '#888',
+                         'letterSpacing': '1px'}),
     ], style={'padding': '8px'}),
 
-    html.Div(id='status', style={'fontSize': '10px', 'padding': '4px 8px',
-                                  'background': '#e8f5e9', 'fontWeight': 'bold'}),
+    html.Div(id='status',
+             style={'fontSize': '10px', 'padding': '4px 8px',
+                    'background': '#e8f5e9', 'fontWeight': 'bold'}),
+
     # Filters
     html.Div([
         dbc.ButtonGroup([
             dbc.Button("ALL", id="f-all", size="sm", outline=True,
                        style={'fontSize': '9px'}),
-            dbc.Button("TRADABLE", id="f-trad", size="sm", outline=True,
-                       active=True, style={'fontSize': '9px', 'color': '#1a5c2a'}),
-            dbc.Button("DECORR", id="f-decorr", size="sm", outline=True,
+            dbc.Button("TRADABLE", id="f-trad", size="sm",
+                       outline=True, active=True,
+                       style={'fontSize': '9px', 'color': '#1a5c2a'}),
+            dbc.Button("DECORR", id="f-decorr", size="sm",
+                       outline=True,
                        style={'fontSize': '9px', 'color': '#8b4513'},
                        className="ms-1"),
         ], size="sm", className="me-2"),
-        dcc.Dropdown(id='f-dir',
-                     options=[{'label': x, 'value': x}
-                              for x in ['ALL', 'LONG', 'SHORT']],
-                     value='ALL', clearable=False,
-                     style={'width': '80px', 'fontSize': '10px',
-                            'display': 'inline-block'}),
+        dcc.Dropdown(
+            id='f-dir',
+            options=[{'label': x, 'value': x}
+                     for x in ['ALL', 'LONG', 'SHORT']],
+            value='ALL', clearable=False,
+            style={'width': '80px', 'fontSize': '10px',
+                   'display': 'inline-block'}),
         dcc.Dropdown(id='f-sort', options=[
             {'label': 'TMS ↓', 'value': 'tms'},
             {'label': 'FMS ↓', 'value': 'fms'},
@@ -1327,19 +1361,19 @@ app.layout = html.Div([
             {'label': 'Δ CORR ↑', 'value': 'corr_delta'},
             {'label': 'STASIS ↓', 'value': 'stasis'},
             {'label': '52W ↑', 'value': '52w'},
-        ],
-            value='tms', clearable=False,
-            style={'width': '100px', 'fontSize': '10px', 'display': 'inline-block',
-                   'marginLeft': '4px'}),
+        ], value='tms', clearable=False,
+            style={'width': '100px', 'fontSize': '10px',
+                   'display': 'inline-block', 'marginLeft': '4px'}),
     ], className="d-flex align-items-center p-1",
        style={'background': '#f5f0e8'}),
 
-    # Table — updated columns to include correlation data
+    # Table
     dash_table.DataTable(
-        id='tbl', columns=[{'name': c, 'id': c} for c in [
+        id='tbl',
+        columns=[{'name': c, 'id': c} for c in [
             '✓', 'SYM', 'BAND', 'STS', 'DIR',
             'SMS', 'FMS', 'CMS', 'TMS',
-            'CORR', 'ΔCOR', 'DCOR', 'DIV',
+            'C@E', 'C@N', 'ΔCOR', 'DCOR', 'DIV',
             'REV5', 'FCF5', 'FCFY', '52W',
             'PRICE', 'TP', 'SL', 'R:R', 'DUR']],
         sort_action='native',
@@ -1359,25 +1393,25 @@ app.layout = html.Div([
         ],
         style_header={
             'backgroundColor': '#1a5c2a', 'color': '#fff',
-            'fontWeight': '700', 'fontSize': '9px', 'textAlign': 'center'},
+            'fontWeight': '700', 'fontSize': '9px',
+            'textAlign': 'center'},
         style_data_conditional=[
-            # Direction colors
-            {'if': {'filter_query': '{DIR} = "LONG"', 'column_id': 'DIR'},
+            {'if': {'filter_query': '{DIR} = "LONG"',
+                    'column_id': 'DIR'},
              'color': '#1a8c3a', 'fontWeight': 'bold'},
-            {'if': {'filter_query': '{DIR} = "SHORT"', 'column_id': 'DIR'},
+            {'if': {'filter_query': '{DIR} = "SHORT"',
+                    'column_id': 'DIR'},
              'color': '#cc2200', 'fontWeight': 'bold'},
-            # Stasis highlighting
             {'if': {'filter_query': '{STS} >= 10'},
              'backgroundColor': '#e8f5e9'},
             {'if': {'filter_query': '{STS} >= 7 && {STS} < 10'},
              'backgroundColor': '#f1f8e9'},
-            # Price column
             {'if': {'column_id': 'PRICE'},
              'color': '#0055aa', 'fontWeight': '600'},
             {'if': {'column_id': 'TP'}, 'color': '#1a8c3a'},
             {'if': {'column_id': 'SL'}, 'color': '#cc2200'},
-            # TMS highlighting
-            {'if': {'filter_query': '{TMS} >= 35', 'column_id': 'TMS'},
+            {'if': {'filter_query': '{TMS} >= 35',
+                    'column_id': 'TMS'},
              'backgroundColor': '#1a8c3a', 'color': '#fff'},
             {'if': {'filter_query': '{TMS} >= 25 && {TMS} < 35',
                     'column_id': 'TMS'},
@@ -1385,8 +1419,8 @@ app.layout = html.Div([
             {'if': {'filter_query': '{TMS} >= 15 && {TMS} < 25',
                     'column_id': 'TMS'},
              'backgroundColor': '#81c784', 'color': '#fff'},
-            # CMS (correlation merit) highlighting
-            {'if': {'filter_query': '{CMS} >= 8', 'column_id': 'CMS'},
+            {'if': {'filter_query': '{CMS} >= 8',
+                    'column_id': 'CMS'},
              'backgroundColor': '#e65100', 'color': '#fff'},
             {'if': {'filter_query': '{CMS} >= 5 && {CMS} < 8',
                     'column_id': 'CMS'},
@@ -1394,44 +1428,40 @@ app.layout = html.Div([
             {'if': {'filter_query': '{CMS} >= 3 && {CMS} < 5',
                     'column_id': 'CMS'},
              'backgroundColor': '#ffb74d', 'color': '#000'},
-            # Decorrelation score highlighting
-            {'if': {'filter_query': '{_dcor_raw} >= 0.5',
-                    'column_id': 'DCOR'},
-             'backgroundColor': '#d32f2f', 'color': '#fff'},
-            {'if': {'filter_query': '{_dcor_raw} >= 0.3 && {_dcor_raw} < 0.5',
-                    'column_id': 'DCOR'},
-             'backgroundColor': '#ff7043', 'color': '#fff'},
-            # Divergence highlighting
-            {'if': {'filter_query': '{DIV} = "P>R"', 'column_id': 'DIV'},
+            {'if': {'filter_query': '{DIV} = "P>R"',
+                    'column_id': 'DIV'},
              'backgroundColor': '#fff3e0', 'color': '#e65100'},
-            {'if': {'filter_query': '{DIV} = "P<R"', 'column_id': 'DIV'},
+            {'if': {'filter_query': '{DIV} = "P<R"',
+                    'column_id': 'DIV'},
              'backgroundColor': '#e8f5e9', 'color': '#1b5e20'},
-            # Alternating rows
-            {'if': {'row_index': 'odd'}, 'backgroundColor': '#f0ebe0'},
+            {'if': {'row_index': 'odd'},
+             'backgroundColor': '#f0ebe0'},
         ],
         tooltip_header={
-            'CORR': 'Price:Revenue 5-quarter correlation',
-            'ΔCOR': 'Correlation change (negative = decorrelating)',
-            'DCOR': 'Decorrelation score (0-1, higher = more decorrelated)',
+            'C@E': 'Correlation at last earnings date',
+            'C@N': 'Correlation now (with live price)',
+            'ΔCOR': 'Delta: C@N minus C@E (neg = decorrelating)',
+            'DCOR': 'Decorrelation score (0-1)',
             'CMS': 'Correlation Merit Score',
-            'DIV': 'Price vs Revenue divergence direction',
+            'DIV': 'Price vs Revenue divergence',
         },
     ),
 
-    # Footer
     html.Div("© 2026 Truth Communications LLC • STASIS AM",
              className="text-center",
-             style={'fontSize': '8px', 'color': '#888', 'padding': '4px'}),
+             style={'fontSize': '8px', 'color': '#888',
+                    'padding': '4px'}),
 
 ], style={'background': '#f5f0e8', 'minHeight': '100vh'})
 
 
 # ============================================================================
-# CALLBACKS (UPDATED)
+# CALLBACKS
 # ============================================================================
 
 
-@app.callback(Output('status', 'children'), Input('tick', 'n_intervals'))
+@app.callback(
+    Output('status', 'children'), Input('tick', 'n_intervals'))
 def update_status(n):
     if not manager.backfill_complete:
         return html.Span(
@@ -1440,12 +1470,12 @@ def update_status(n):
     st = price_feed.get_status()
     am_data = manager.get_am_data()
     tradable = sum(1 for d in am_data if d.get('is_tradable'))
-    corr_count = sum(1 for v in config.correlation_data.values()
-                     if v.get('corr_5q') is not None)
+    corr_count = sum(
+        1 for v in config.correlation_data.values()
+        if v.get('corr_at_earnings') is not None)
     decorr_count = sum(
         1 for v in config.correlation_data.values()
-        if v.get('decorrelation_score') is not None
-        and v['decorrelation_score'] > 0.3)
+        if (v.get('decorrelation_score') or 0) > 0.3)
     if st['connected'] == 0:
         return html.Span(
             f"🔴 Connecting... | {tradable} tradable",
@@ -1454,7 +1484,8 @@ def update_status(n):
         f"🟢 LIVE {st['connected']}/{st['total']} | "
         f"📨 {st['messages']:,} msgs | "
         f"📊 {len(config.fundamental_slopes)} fundamentals | "
-        f"🔗 {corr_count} correlations ({decorr_count} decorrelating) | "
+        f"🔗 {corr_count} correlations "
+        f"({decorr_count} decorrelating) | "
         f"🎯 {tradable} tradable",
         style={'color': '#1a5c2a'})
 
@@ -1490,7 +1521,6 @@ def update_table(n, fm, fd, fs):
         if fm == 'tradable' and not d.get('is_tradable'):
             continue
         if fm == 'decorr':
-            # Only show stocks with significant decorrelation
             cd = d.get('corr_details', {})
             dcor = cd.get('decor_score')
             if dcor is None or dcor < 0.15:
@@ -1502,13 +1532,12 @@ def update_table(n, fm, fd, fs):
         cd = d.get('corr_details', {})
         w52 = d.get('week52_percentile')
 
-        # Format correlation columns
-        corr_5q = cd.get('corr_5q')
+        corr_at_e = cd.get('corr_at_earnings')
+        corr_now = cd.get('corr_now')
         corr_delta = cd.get('corr_delta')
         decor_score = cd.get('decor_score')
         divergence = cd.get('divergence')
 
-        # Divergence display
         div_display = '—'
         if divergence == 'PRICE_AHEAD':
             div_display = 'P>R'
@@ -1527,7 +1556,8 @@ def update_table(n, fm, fd, fs):
             'FMS': d.get('fms', 0),
             'CMS': d.get('cms', 0),
             'TMS': d.get('tms', 0),
-            'CORR': fmt_corr(corr_5q),
+            'C@E': fmt_corr(corr_at_e),
+            'C@N': fmt_corr(corr_now),
             'ΔCOR': fmt_corr_delta(corr_delta),
             'DCOR': (f"{decor_score:.2f}"
                      if decor_score is not None else '—'),
@@ -1536,7 +1566,8 @@ def update_table(n, fm, fd, fs):
             'FCF5': fmt_slope(sd.get('FCF_5')),
             'FCFY': (f"{sd['FCFY'] * 100:.1f}%"
                      if sd.get('FCFY') else '—'),
-            '52W': f"{w52:.0f}%" if w52 is not None else '—',
+            '52W': (f"{w52:.0f}%"
+                    if w52 is not None else '—'),
             'PRICE': (f"${d['current_price']:.2f}"
                       if d.get('current_price') else '—'),
             'TP': (f"${d['take_profit']:.2f}"
@@ -1545,15 +1576,16 @@ def update_table(n, fm, fd, fs):
                    if d.get('stop_loss') else '—'),
             'R:R': fmt_rr(d.get('risk_reward')),
             'DUR': d.get('stasis_duration_str', '—'),
-            # Hidden sort columns
+            # hidden sort cols
             '_tms': d.get('tms', 0),
             '_fms': d.get('fms', 0),
             '_cms': d.get('cms', 0),
             '_stasis': d['stasis'],
             '_52w': w52 if w52 is not None else 999,
-            '_dcor_raw': decor_score if decor_score is not None else -1,
-            '_corr_delta': (corr_delta if corr_delta is not None
-                            else 999),
+            '_dcor_raw': (decor_score
+                          if decor_score is not None else -1),
+            '_corr_delta': (corr_delta
+                            if corr_delta is not None else 999),
         })
     if not rows:
         return []
@@ -1563,7 +1595,7 @@ def update_table(n, fm, fd, fs):
         'fms': ('_fms', False),
         'cms': ('_cms', False),
         'decorr': ('_dcor_raw', False),
-        'corr_delta': ('_corr_delta', True),  # ascending: most negative first
+        'corr_delta': ('_corr_delta', True),
         'stasis': ('_stasis', False),
         '52w': ('_52w', True),
     }
@@ -1588,39 +1620,44 @@ def health():
         'initialized': manager.initialized,
         'backfill_complete': manager.backfill_complete,
         'backfill_progress': manager.backfill_progress,
-        'correlations_calculated': len(config.correlation_data),
+        'correlations_calculated': sum(
+            1 for v in config.correlation_data.values()
+            if v.get('corr_at_earnings') is not None),
     })
 
 
 @server.route('/api/correlations')
 def api_correlations():
-    """API endpoint to get all correlation data."""
     result = {}
     for sym, data in config.correlation_data.items():
-        if data.get('corr_5q') is not None:
+        if data.get('corr_at_earnings') is not None:
             result[sym] = {
-                'corr_5q': data['corr_5q'],
-                'corr_4q_prev': data.get('corr_4q_prev'),
+                'corr_at_earnings': data['corr_at_earnings'],
+                'corr_now': data.get('corr_now'),
                 'corr_delta': data.get('corr_delta'),
                 'decorrelation_score': data.get('decorrelation_score'),
                 'divergence': data.get('price_vs_rev_divergence'),
-                'quarters_available': data.get('quarters_available'),
-                'latest_rev_change_pct': data.get('latest_rev_change_pct'),
-                'latest_price_change_pct': data.get('latest_price_change_pct'),
+                'earnings_date_price': data.get('earnings_date_price'),
+                'current_price': data.get('current_price'),
+                'price_change_since_earnings_pct': data.get(
+                    'price_change_since_earnings_pct'),
+                'latest_rev_change_pct': data.get(
+                    'latest_rev_change_pct'),
+                'aligned_quarters': data.get('aligned_count'),
             }
     return json.dumps(result, indent=2)
 
 
 @server.route('/api/decorrelating')
 def api_decorrelating():
-    """API endpoint: stocks sorted by decorrelation score."""
     items = []
     for sym, data in config.correlation_data.items():
         if data.get('decorrelation_score') is not None:
             items.append({
                 'symbol': sym,
                 'decorrelation_score': data['decorrelation_score'],
-                'corr_5q': data['corr_5q'],
+                'corr_at_earnings': data.get('corr_at_earnings'),
+                'corr_now': data.get('corr_now'),
                 'corr_delta': data.get('corr_delta'),
                 'divergence': data.get('price_vs_rev_divergence'),
             })
@@ -1629,7 +1666,7 @@ def api_decorrelating():
 
 
 # ============================================================================
-# INITIALIZATION (UPDATED)
+# INITIALIZATION
 # ============================================================================
 
 _init_done = False
@@ -1644,41 +1681,32 @@ def initialize():
         print("=" * 70)
         print("  STASIS AM SERVER")
         print("  © 2026 Truth Communications LLC")
-        print("  Now with Price:Revenue Correlation Analysis")
+        print("  Price:Revenue Correlation Analysis")
         print("=" * 70)
         print(f"\n🎯 Symbols: {len(config.symbols)}")
 
-        # Step 1: 52-week data
         config.week52_data = fetch_52_week_data()
-
-        # Step 2: Volume data
         config.volumes = fetch_volume_data()
-
-        # Step 3: Fundamental data (revenue, FCF, etc.)
         fetch_all_fundamental_data()
 
-        # Step 4: Price:Revenue Correlations (NEW)
+        # Correlation — uses its own self-contained pipeline
         calculate_all_correlations()
 
-        # Step 5: Backfill bitstreams
         manager.backfill()
-
-        # Step 6: Start live feeds
         price_feed.start()
         manager.start()
 
-        corr_count = sum(
+        corr_ok = sum(
             1 for v in config.correlation_data.values()
-            if v.get('corr_5q') is not None)
-        decorr_count = sum(
+            if v.get('corr_at_earnings') is not None)
+        decorr = sum(
             1 for v in config.correlation_data.values()
-            if v.get('decorrelation_score') is not None
-            and v['decorrelation_score'] > 0.3)
+            if (v.get('decorrelation_score') or 0) > 0.3)
 
         print(f"\n✅ READY")
         print(f"   📊 {len(config.fundamental_slopes)} fundamentals")
-        print(f"   🔗 {corr_count} correlations calculated")
-        print(f"   🔔 {decorr_count} significantly decorrelating")
+        print(f"   🔗 {corr_ok} correlations calculated")
+        print(f"   🔔 {decorr} significantly decorrelating")
         print("=" * 70)
         _init_done = True
 
