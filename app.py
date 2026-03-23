@@ -1023,22 +1023,77 @@ def calculate_fundamental_merit_score(symbol, w52_pct):
     sd = {}
     slopes = config.fundamental_slopes.get(symbol, {})
     fund = config.fundamental_data.get(symbol, {})
+
+    # ---------- helper ----------
+    def last5_all_positive(series):
+        if len(series) < 5:
+            return False
+        last5 = series[-5:]
+        return all(x is not None and x > 0 for x in last5)
+    
+    def last5_latest_is_highest(series):
+        if len(series) < 5:
+            return False
+        last5 = series[-5:]
+        if any(x is None for x in last5):
+            return False
+        return last5[-1] == max(last5)
+    
+    # ---------- NET INCOME ----------
     ni = fund.get('net_income', [])
-
-    if len(ni) >= 5:
-        last5 = ni[-5:]
-
-        if all(x is not None and x > 0 for x in last5):
-            ms += 4
-            sd['NI_5_Positive'] = True
-        else:
-            sd['NI_5_Positive'] = False
-
-        if last5[-1] == max(last5):
-            ms += 3
-            sd['NI_Latest_Highest_5Q'] = True
-        else:
-            sd['NI_Latest_Highest_5Q'] = False
+    if last5_all_positive(ni):
+        ms += 4
+        sd['NI_5_Positive'] = True
+    else:
+        sd['NI_5_Positive'] = False
+    
+    if last5_latest_is_highest(ni):
+        ms += 3
+        sd['NI_Latest_Highest_5Q'] = True
+    else:
+        sd['NI_Latest_Highest_5Q'] = False
+    
+    # ---------- OPERATING CASH FLOW ----------
+    ocf = fund.get('operating_cash_flow', [])
+    if last5_all_positive(ocf):
+        ms += 4
+        sd['OCF_5_Positive'] = True
+    else:
+        sd['OCF_5_Positive'] = False
+    
+    if last5_latest_is_highest(ocf):
+        ms += 3
+        sd['OCF_Latest_Highest_5Q'] = True
+    else:
+        sd['OCF_Latest_Highest_5Q'] = False
+    
+    # ---------- FREE CASH FLOW ----------
+    fcf = fund.get('fcf', [])
+    if last5_all_positive(fcf):
+        ms += 4
+        sd['FCF_5_Positive'] = True
+    else:
+        sd['FCF_5_Positive'] = False
+    
+    if last5_latest_is_highest(fcf):
+        ms += 3
+        sd['FCF_Latest_Highest_5Q'] = True
+    else:
+        sd['FCF_Latest_Highest_5Q'] = False
+    
+    # ---------- REVENUE ----------
+    rev = fund.get('revenue', [])
+    if last5_all_positive(rev):
+        ms += 2
+        sd['REV_5_Positive'] = True
+    else:
+        sd['REV_5_Positive'] = False
+    
+    if last5_latest_is_highest(rev):
+        ms += 3
+        sd['REV_Latest_Highest_5Q'] = True
+    else:
+        sd['REV_Latest_Highest_5Q'] = False
     
     if not slopes:
         if w52_pct is not None:
