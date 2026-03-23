@@ -1022,6 +1022,24 @@ def calculate_fundamental_merit_score(symbol, w52_pct):
     ms = 0
     sd = {}
     slopes = config.fundamental_slopes.get(symbol, {})
+    fund = config.fundamental_data.get(symbol, {})
+    ni = fund.get('net_income', [])
+
+    if len(ni) >= 5:
+        last5 = ni[-5:]
+
+        if all(x is not None and x > 0 for x in last5):
+            ms += 4
+            sd['NI_5_Positive'] = True
+        else:
+            sd['NI_5_Positive'] = False
+
+        if last5[-1] == max(last5):
+            ms += 3
+            sd['NI_Latest_Highest_5Q'] = True
+        else:
+            sd['NI_Latest_Highest_5Q'] = False
+    
     if not slopes:
         if w52_pct is not None:
             for t, p in [(5, 8), (15, 7), (25, 6), (35, 5), (45, 4),
@@ -1071,6 +1089,7 @@ def calculate_fundamental_merit_score(symbol, w52_pct):
             ms += 2
         elif fcfy >= 0.05:
             ms += 1
+    
     return ms, sd
 
 
